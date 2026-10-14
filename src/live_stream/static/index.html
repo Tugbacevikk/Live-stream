@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canlı Altyazı</title>
+<style>
+  :root {
+    --bg: #0e0f11; --panel: #17191c; --line: #2a2d32; --ink: #f2f1ec; --muted: #8b8f96;
+    --old: #a9abb0; --partial: #7fb0ff; --accent: #3d7cf0; --rec: #ef5a4f; --ok: #3fbf7f;
+    --size: 34px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; font-weight: 650; margin: 0 8px 0 0; letter-spacing: .2px; }
+  button, select, label.btn { font: inherit; font-size: 14px; color: var(--ink); background: #22252a; border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  button:hover, label.btn:hover { border-color: #3a3e45; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.stop { background: var(--rec); border-color: var(--rec); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  select { max-width: 220px; }
+  input[type=file] { display: none; }
+  .spacer { flex: 1; }
+  .status { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.live { background: var(--rec); animation: pulse 1.1s infinite; }
+  .dot.ok { background: var(--ok); }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .meter { width: 70px; height: 6px; background: #2a2d32; border-radius: 3px; overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .08s; }
+  .pill { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; }
+  details.settings { padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  details.settings summary { padding: 8px 0; cursor: pointer; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; padding: 4px 0 12px; }
+  .grid label { display: flex; flex-direction: column; gap: 4px; }
+  .grid input[type=number] { font: inherit; color: var(--ink); background: #22252a; border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  .grid .check { flex-direction: row; align-items: center; gap: 8px; }
+
+  #stage { flex: 1; overflow-y: auto; padding: 28px clamp(16px, 6vw, 96px) 40vh; scroll-behavior: smooth; }
+  .line { font-size: var(--size); line-height: 1.32; font-weight: 500; margin: 0 0 .45em; color: var(--old); transition: color .4s; overflow-wrap: anywhere; }
+  .line:last-of-type { color: var(--ink); }
+  .line .t { display: block; font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .4px; margin-bottom: 2px; }
+  #partial { font-size: var(--size); line-height: 1.32; color: var(--partial); min-height: 1.3em; font-weight: 500; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); font-size: 18px; text-align: center; margin-top: 18vh; }
+
+  /* Sunum modu: kontroller gizli, yalnızca son satırlar */
+  body.present header, body.present details.settings { display: none; }
+  body.present #stage { padding-top: 10vh; padding-bottom: 12vh; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
+  body.present .line .t { display: none; }
+  body.present .line:not(:nth-last-of-type(-n+3)) { display: none; }
+  .exit-hint { position: fixed; top: 10px; right: 14px; color: var(--muted); font-size: 12px; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  body.present .exit-hint { opacity: .6; }
+
+  @media (prefers-color-scheme: light) {
+    :root:not(.dark) { --bg: #fafaf7; --panel: #fff; --line: #e3e2dc; --ink: #151513; --muted: #73716b; --old: #5d5c57; --partial: #2f63c9; }
+    :root:not(.dark) button, :root:not(.dark) select, :root:not(.dark) label.btn, :root:not(.dark) .grid input[type=number] { background: #f2f1ec; }
+    :root:not(.dark) .meter { background: #e3e2dc; }
+  }
+  @media (max-width: 640px) { :root { --size: 24px; } header h1 { width: 100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Canlı Altyazı</h1>
+  <button id="startBtn" class="primary">🎙 Başlat</button>
+  <select id="micSel" title="Mikrofon"><option value="">Varsayılan mikrofon</option></select>
+  <label class="btn" for="fileIn" title="Bir kaydı gerçek zaman hızında çalarak test et">📄 Dosyayla test</label>
+  <input id="fileIn" type="file" accept="audio/*">
+  <button id="stopBtn" class="stop" disabled>Durdur</button>
+  <button id="presentBtn" title="Tam ekran sunum modu (F)">⛶ Sunum modu</button>
+  <button id="smaller" title="Yazıyı küçült (-)">A−</button>
+  <button id="bigger" title="Yazıyı büyüt (+)">A+</button>
+  <button id="saveBtn" title="Metni .txt olarak indir">⬇ Metni indir</button>
+  <span class="spacer"></span>
+  <span class="status">
+    <span class="meter"><i id="lvl"></i></span>
+    <span class="pill" id="lag" hidden></span>
+    <span class="pill" id="dev" hidden></span>
+    <span class="dot" id="dot"></span><span id="st">Hazır</span>
+  </span>
+</header>
+
+<details class="settings">
+  <summary>Ayarlar</summary>
+  <div class="grid">
+    <label>Cümle sonu duraklaması (ms)<input id="silence_ms" type="number" min="300" max="2000" step="50" value="700"></label>
+    <label>Ara metin sıklığı (sn, 0 = kapalı)<input id="partial_sec" type="number" min="0" max="5" step="0.1" value="1.2"></label>
+    <label>Azami cümle süresi (sn)<input id="max_sec" type="number" min="4" max="30" step="1" value="12"></label>
+    <label class="check"><input id="save" type="checkbox" checked> Sesi ve metni diske kaydet</label>
+    <label class="check"><input id="ns" type="checkbox" checked> Tarayıcı gürültü bastırma</label>
+  </div>
+</details>
+
+<main id="stage"><div class="empty" id="empty">“Başlat”a basıp konuşmaya başlayın.</div><div id="partial"></div></main>
+<div class="exit-hint">Çıkmak için Esc</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const stage = $("stage"), partialEl = $("partial");
+let ws = null, ctx = null, node = null, src = null, mic = null, wakeLock = null;
+let running = false, source = null, retryTimer = null, offset = 0, sent = 0;
+const transcript = [];
+
+/* ---------- Ses yakalama: AudioWorklet ile 16 kHz Int16 paketler ---------- */
+const WORKLET = `
+class Pcm16 extends AudioWorkletProcessor {
+  constructor() { super(); this.ratio = sampleRate / 16000; this.pos = 0; this.buf = new Float32Array(1600); this.n = 0; this.sq = 0; this.cnt = 0; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let k = 0; k < ch.length; k++) { this.sq += ch[k] * ch[k]; }
+    this.cnt += ch.length;
+    while (this.pos < ch.length) {
+      const i = this.pos | 0, f = this.pos - i;
+      const s = ch[i] * (1 - f) + (i + 1 < ch.length ? ch[i + 1] : ch[i]) * f;
+      this.buf[this.n++] = s;
+      if (this.n === this.buf.length) {
+        const out = new Int16Array(this.n);
+        for (let j = 0; j < this.n; j++) { const v = Math.max(-1, Math.min(1, this.buf[j])); out[j] = v * 32767; }
+        this.port.postMessage({ pcm: out.buffer, rms: Math.sqrt(this.sq / this.cnt) }, [out.buffer]);
+        this.n = 0; this.sq = 0; this.cnt = 0;
+      }
+      this.pos += this.ratio;
+    }
+    this.pos -= ch.length;
+    return true;
+  }
+}
+registerProcessor("pcm16", Pcm16);`;
+
+async function makeContext(preferred16k) {
+  const c = preferred16k ? new AudioContext({ sampleRate: 16000 }) : new AudioContext();
+  await c.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
+  return c;
+}
+
+async function openAudio(kind) {
+  if (kind.type === "mic") {
+    mic = await navigator.mediaDevices.getUserMedia({ audio: {
+      deviceId: kind.deviceId ? { exact: kind.deviceId } : undefined,
+      channelCount: 1, echoCancellation: false, noiseSuppression: $("ns").checked, autoGainControl: true } });
+    try { ctx = await makeContext(true); src = ctx.createMediaStreamSource(mic); }
+    catch { await ctx?.close().catch(() => {}); ctx = await makeContext(false); src = ctx.createMediaStreamSource(mic); }
+  } else {
+    ctx = await makeContext(false);
+    const buf = await ctx.decodeAudioData(await kind.file.arrayBuffer());
+    src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);           // dinleyerek takip et
+    src.onended = () => { if (running) stop(); };
+  }
+  node = new AudioWorkletNode(ctx, "pcm16");
+  node.port.onmessage = ({ data }) => {
+    $("lvl").style.width = Math.min(100, data.rms * 600) + "%";
+    if (ws && ws.readyState === 1) { sent += data.pcm.byteLength / 2; ws.send(data.pcm); }
+  };
+  src.connect(node);
+  if (src.start) src.start();
+}
+
+function closeAudio() {
+  try { src?.disconnect(); src?.stop?.(); } catch {}
+  mic?.getTracks().forEach((t) => t.stop());
+  node?.port.close();
+  ctx?.close().catch(() => {});
+  ctx = node = src = mic = null;
+  $("lvl").style.width = "0";
+}
+
+/* ---------- Sunucu bağlantısı ---------- */
+function connect() {
+  offset = sent / 16000;  // yeniden bağlanınca zaman damgaları kaldığı yerden devam etsin
+  const p = new URLSearchParams({
+    silence_ms: $("silence_ms").value, partial_sec: $("partial_sec").value,
+    max_sec: $("max_sec").value, save: $("save").checked ? "1" : "0" });
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws?${p}`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onmessage = async (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "ready") {
+      setStatus("Dinleniyor", "live");
+      $("dev").hidden = false; $("dev").textContent = `${m.model} · ${m.device === "cuda" ? "GPU" : "CPU"}`;
+      if (!ctx) {
+        try { await openAudio(source); }
+        catch (err) { setStatus("Ses açılamadı: " + err.message); running = false; ws.close(); resetButtons(); }
+      }
+    } else if (m.type === "partial") {
+      partialEl.textContent = m.text;
+      follow();
+    } else if (m.type === "final") {
+      addLine(m);
+    } else if (m.type === "discard") {
+      partialEl.textContent = "";
+    } else if (m.type === "stats") {
+      $("lag").hidden = false; $("lag").textContent = `gecikme ${m.lag_sec.toFixed(1)} sn`;
+    } else if (m.type === "error") {
+      setStatus("Hata: " + m.message);
+    } else if (m.type === "done") {
+      setStatus("Tamamlandı", "ok");
+    }
+  };
+
+  ws.onclose = () => {
+    ws = null;
+    if (running) {
+      // Beklenmedik kopma: ses açık kalır, 1,5 sn sonra yeniden bağlan
+      setStatus("Bağlantı koptu, yeniden bağlanılıyor…");
+      retryTimer = setTimeout(connect, 1500);
+    }
+  };
+}
+
+/* ---------- Ekran ---------- */
+function fmt(sec) {
+  const s = Math.floor(sec), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return (h ? h + ":" : "") + String(m).padStart(h ? 2 : 1, "0") + ":" + String(s % 60).padStart(2, "0");
+}
+function addLine(m) {
+  $("empty")?.remove();
+  const start = m.start + offset;
+  transcript.push({ start, text: m.text });
+  const p = document.createElement("p");
+  p.className = "line";
+  p.innerHTML = `<span class="t">${fmt(start)}</span>`;
+  p.append(document.createTextNode(m.text));
+  stage.insertBefore(p, partialEl);
+  partialEl.textContent = "";
+  follow();
+}
+function follow() {
+  // Kullanıcı yukarı kaydırıp eski satırları okuyorsa zorla aşağı çekme
+  const nearBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < stage.clientHeight * 0.6;
+  if (nearBottom || document.body.classList.contains("present")) stage.scrollTop = stage.scrollHeight;
+}
+function setStatus(text, state) {
+  $("st").textContent = text;
+  $("dot").className = "dot" + (state ? " " + state : "");
+}
+function resetButtons() {
+  $("startBtn").disabled = false; $("fileIn").disabled = false; $("stopBtn").disabled = true; $("micSel").disabled = false;
+}
+
+/* ---------- Başlat / Durdur ---------- */
+async function start(kind) {
+  if (running) return;
+  running = true; source = kind; offset = 0; sent = 0;
+  $("startBtn").disabled = true; $("fileIn").disabled = true; $("stopBtn").disabled = false; $("micSel").disabled = true;
+  setStatus("Model hazırlanıyor…");
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  connect();
+}
+function stop() {
+  running = false;
+  clearTimeout(retryTimer);
+  closeAudio();
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify({ type: "stop" })); setStatus("Son cümle işleniyor…"); }
+  else setStatus("Durduruldu");
+  wakeLock?.release().catch(() => {}); wakeLock = null;
+  resetButtons();
+}
+
+/* ---------- Mikrofon listesi ---------- */
+async function listMics() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput");
+    const cur = $("micSel").value;
+    $("micSel").innerHTML = '<option value="">Varsayılan mikrofon</option>' +
+      devs.filter((d) => d.deviceId && d.deviceId !== "default").map((d, i) =>
+        `<option value="${d.deviceId}">${(d.label || "Mikrofon " + (i + 1)).replace(/</g, "&lt;")}</option>`).join("");
+    $("micSel").value = cur;
+  } catch {}
+}
+navigator.mediaDevices?.addEventListener?.("devicechange", listMics);
+listMics();
+
+/* ---------- Kontroller ---------- */
+function setSize(px) {
+  px = Math.max(18, Math.min(96, px));
+  document.documentElement.style.setProperty("--size", px + "px");
+  try { localStorage.setItem("captionSize", px); } catch {}
+}
+try { const saved = +localStorage.getItem("captionSize"); if (saved) setSize(saved); } catch {}
+const curSize = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue("--size"));
+
+async function togglePresent(on) {
+  const want = on ?? !document.body.classList.contains("present");
+  document.body.classList.toggle("present", want);
+  try {
+    if (want && !document.fullscreenElement) await document.documentElement.requestFullscreen();
+    if (!want && document.fullscreenElement) await document.exitFullscreen();
+  } catch {}
+  follow();
+}
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) document.body.classList.remove("present"); });
+
+function download() {
+  if (!transcript.length) return;
+  const text = transcript.map((l) => `[${fmt(l.start)}] ${l.text}`).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+  a.download = `altyazi_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+$("startBtn").onclick = async () => { await start({ type: "mic", deviceId: $("micSel").value }); setTimeout(listMics, 1500); };
+$("fileIn").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) start({ type: "file", file: f }); };
+$("stopBtn").onclick = stop;
+$("presentBtn").onclick = () => togglePresent(true);
+$("bigger").onclick = () => setSize(curSize() + 4);
+$("smaller").onclick = () => setSize(curSize() - 4);
+$("saveBtn").onclick = download;
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.key === "f" || e.key === "F") togglePresent();
+  else if (e.key === "Escape") togglePresent(false);
+  else if (e.key === "+" || e.key === "=") setSize(curSize() + 4);
+  else if (e.key === "-") setSize(curSize() - 4);
+});
+window.addEventListener("beforeunload", (e) => { if (running) { e.preventDefault(); e.returnValue = ""; } });
+</script>
+</body>
+</html>

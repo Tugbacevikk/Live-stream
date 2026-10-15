@@ -432,3 +432,35 @@ def test_canli_oturum_sonu_webhooklari_gercek_alici(tmp_path, monkeypatch):
     assert ended["session_id"] == m["session_id"] and len(ended["lines"]) == 2
     assert ended["job_id"] == done["job_id"] == m["job_id"] and got[0][0]["X-Session-Id"] == m["session_id"]
     assert done["status"] == "done" and len({u["speaker"] for u in done["utterances"]}) == 2
+
+
+@VI_OK
+@need(*DIAR)
+def test_canli_konusmaci_etiketi_gercek_imza(tmp_path, monkeypatch):
+    """Gerçek CAM++ imzası: iki farklı kişi (0.wav, 1.wav) farklı, aynı kişi aynı etiket alır."""
+    from fastapi.testclient import TestClient
+
+    from live_stream.interface.local_server import build_local
+    from live_stream.interface.settings import Settings
+
+    monkeypatch.setenv("CONCURRENCY", "1")
+    s = Settings(models_dir=str(M), data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"),
+                 languages=["vi"], verify_models=False, live_auto_analyze=False)
+    app, _, queue, _ = build_local(s, workers=1)
+    w = vi_wavs()
+    sil = np.zeros(16000, dtype=np.float32)
+    pcm = (np.concatenate([sil, w[0], sil, w[1], sil, w[0], sil]) * 32767).astype("<i2").tobytes()
+    try:
+        with TestClient(app) as c:
+            assert c.get("/live/health").json()["speakers"] is True
+            with c.websocket_connect("/ws/live?partial_sec=0") as ws:
+                ws.receive_json()
+                for i in range(0, len(pcm), 3200):
+                    ws.send_bytes(pcm[i:i + 3200])
+                ws.send_text('{"type": "stop"}')
+                msgs = []
+                while (m := ws.receive_json())["type"] != "done":
+                    msgs.append(m)
+    finally:
+        queue.shutdown(wait=False)
+    assert [x["speaker"] for x in msgs if x["type"] == "final"] == ["speaker_00", "speaker_01", "speaker_00"]

@@ -61,6 +61,10 @@ class WhisperParams:
     # Türkçe işlerde birbirini BEKLER (CTranslate2 bir çağrıyı bir işçide çalıştırır);
     # yerel modda eşzamanlı iş sayısına eşitlenir (composition.default_config workers=).
     num_workers: int = 1
+    # Bir çözümün kullandığı iş parçacığı. None: AsrParams.num_threads (ONNX modelleriyle aynı, 2).
+    # Whisper medium 2 iş parçacığıyla tek işte oran ~2,5'e çıkıyordu (Tuğba'nın bilgisayarı,
+    # 2 dk ses 296 sn); projede 4'tü. Ayar: WHISPER_THREADS (varsayılan fiziksel çekirdek).
+    cpu_threads: int | None = None
 
 
 @dataclass(frozen=True)

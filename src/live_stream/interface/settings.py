@@ -49,6 +49,8 @@ class Settings:
     whisper_compute_type: str = field(default_factory=lambda: os.environ.get(
         "WHISPER_COMPUTE_TYPE", "auto").lower())
     threads: int = field(default_factory=lambda: int(os.environ.get("ONNX_THREADS", "2")))
+    # faster-whisper (Türkçe) bir çözüm için iş parçacığı; "auto" = fiziksel çekirdek (2-8)
+    whisper_threads_raw: str = field(default_factory=lambda: os.environ.get("WHISPER_THREADS", "auto"))
     # 0: konuşmacı sayısı sesten bulunur (istekte num_speakers verilirse o kullanılır)
     speakers: int = field(default_factory=lambda: int(os.environ.get("NUM_SPEAKERS", "0")))
     diarizer: str = field(default_factory=lambda: os.environ.get("DIARIZER", "cluster"))
@@ -129,6 +131,13 @@ class Settings:
     # ws://.../ws/live?callback_url=... ile de verilebilir. Önce 'live.ended' (canlı metin),
     # konuşmacı ayrımı bitince aynı adrese 'job.done' gider. İmza: WEBHOOK_SECRET.
     live_webhook_url: str = field(default_factory=lambda: os.environ.get("LIVE_WEBHOOK_URL", "").strip())
+    # Canlı ekranda konuşmacı etiketi (cümle başına CAM++ imzası; oturum sonu toplu iş kesinleştirir)
+    live_speakers: bool = field(default_factory=lambda: os.environ.get(
+        "LIVE_SPEAKERS", "true").lower() in ("1", "true", "evet"))
+    # yeni cümle en yakın konuşmacıya bu kosinüs uzaklığından yakınsa o kişi, değilse yeni kişi.
+    # Farklı kişiler aynı etiketi alıyorsa düşürün (0,4), tek kişi bölünüyorsa yükseltin (0,6).
+    live_speaker_threshold: float = field(default_factory=lambda: float(os.environ.get(
+        "LIVE_SPEAKER_THRESHOLD", "0.5")))
     # Bağlantı koparsa oturum bu kadar sn bekler; sayfa geri bağlanırsa aynı oturum sürer
     # (aynı kayıt, satırlar, dil). 0: beklemeden kapanır.
     live_resume_sec: float = field(default_factory=lambda: float(os.environ.get("LIVE_RESUME_SEC", "30")))
@@ -153,6 +162,19 @@ class Settings:
         """Yerel mod (tek süreç, iş parçacıkları) için aynı anda işlenen ses sayısı."""
         return self.concurrency_plan()[0]
 
+    @property
+    def whisper_threads(self) -> int:
+        """Whisper bir çözümde kaç iş parçacığı kullansın. Tek iş geldiğinde de işlemci boş
+        kalmasın diye ONNX modellerinden (2) ayrı: varsayılan fiziksel çekirdek sayısı."""
+        if self.whisper_threads_raw != "auto":
+            return max(1, int(self.whisper_threads_raw))
+        return max(2, min(8, physical_cpus()))
+
+    def whisper_workers(self, jobs: int) -> int:
+        """Aynı anda kaç Whisper çözümü: iş sayısını ve işlemcinin taşıyabileceğini aşmaz
+        (12 mantıksal / 6 iş parçacığı = 2). Fazla işler sırada bekler, işlemci aşırı bölünmez."""
+        return max(1, min(jobs, available_cpus() // self.whisper_threads))
+
     def model_for(self, lang: str) -> str:
         from live_stream.infrastructure.catalog import DEFAULT_MODELS
 
@@ -171,7 +193,9 @@ class Settings:
         v = os.environ.get("CONCURRENCY", "auto")
         if v != "auto":
             return max(1, int(v)), "CONCURRENCY ayarı"
-        by_cpu = max(1, available_cpus() // max(1, self.threads))
+        per = self.whisper_threads if queue and self.model_for(queue).startswith("faster-whisper") \
+            else self.threads
+        by_cpu = max(1, available_cpus() // max(1, per))
         total = total_memory_gb()
         if total is None:
             return by_cpu, f"çekirdek: {available_cpus()} / {self.threads} (bellek okunamadı)"
@@ -227,6 +251,20 @@ def total_memory_gb() -> float | None:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
     except (ValueError, OSError, AttributeError):
         return None
+
+
+def physical_cpus() -> int:
+    """Fiziksel çekirdek (hiper iş parçacığı sayılmaz: int8 matris çarpımında ikinci iş
+    parçacığı az hız katar). psutil yoksa mantıksal çekirdeğin yarısı."""
+    try:
+        import psutil
+
+        n = psutil.cpu_count(logical=False)
+        if n:
+            return min(n, available_cpus())
+    except ImportError:
+        pass
+    return max(1, available_cpus() // 2)
 
 
 def available_cpus() -> int:

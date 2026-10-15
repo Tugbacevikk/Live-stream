@@ -45,7 +45,9 @@ class SessionRecorder:
             self._wav.flush()
 
     def write_final(self, item: dict) -> None:
-        self._txt.write(f"[{_fmt(item['start'])}] {item['text']}\n")
+        spk = item.get("speaker")
+        who = f"Konuşmacı {int(spk.rsplit('_', 1)[-1]) + 1}: " if spk else ""
+        self._txt.write(f"[{_fmt(item['start'])}] {who}{item['text']}\n")
         self._txt.flush()
         self._jsonl.write(json.dumps(item, ensure_ascii=False) + "\n")
         self._jsonl.flush()

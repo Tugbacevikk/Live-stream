@@ -201,3 +201,35 @@ parçacığı, GPU yok). Bu sistemde yeniden ölçülmedi; proje sahibinin onay�
 - 4000 mesaj: sahte modellerle 4 eşzamanlı işçi, çift işleme yok (test_worker_accuracy.py).
   Süre tablosu small modelin oranından hesaplanmış (10 sn'lik 4000 mesaj, 4 işçi ≈ 22 dk);
   medium ile aynı yük yaklaşık 4 kat sürer. `/metrics` kuyrukta bekleme süresini gösterir.
+
+## Türkçe yavaşlık — 15 Ekim 2026 (Tuğba'nın bilgisayarı, i5-11400H 6 çekirdek/12 iş parçacığı)
+
+Vietnamese-speech-to-text-models'te (860a0ea) ölçüldü ve düzeltildi; buraya taşındı.
+2 dk Türkçe diyalog, medium, dil sesten: **296 sn (oran 2,46)**, kapsama %83. fine-tuning
+projesinde aynı model 0,94. Kodda bulunan iki neden:
+
+1. **İş parçacığı:** Whisper ONNX modelleriyle aynı bütçeyi alıyordu (`ONNX_THREADS=2`); tek iş
+   gelince 10 iş parçacığı boş kalıyordu. Artık ayrı: `WHISPER_THREADS` (varsayılan fiziksel
+   çekirdek = 6), aynı anda 12 / 6 = 2 Whisper çözümü. Canlı altyazı da aynı model nesnesini
+   kullandığı için CPU'da o da hızlanır.
+2. **Güvenlik ağı:** kelime çıkmayan her boşluk tek tek, 4 sıcaklıkla ve her sıcaklıkta 5
+   örnekle çözülüyordu; Whisper her çağrıda 30 sn'lik pencere işlediği için 2 sn'lik boşluk
+   bile 30 sn'lik ses kadar sürüyordu. Artık tüm boşluklar tek toplu çözüm (sıcaklık 0); hâlâ
+   boşların en uzun 4'ü sıcaklık 0,2/0,4, tek örnek, beam 1.
+
+Yeni süre burada ölçülemedi (medium indirilemedi); sonuçta aşama süreleri (`timings`) var ve
+arayüzde "Aşamalar" olarak görünür. Ölçüm: `python benchmarks/kabul_testi.py --dil tr kayit.wav`.
+
+## Canlı altyazı — 15 Ekim 2026 (bulut, 2 çekirdek, yalnızca CPU)
+
+`benchmarks/canli_testi.py`, Vietnamca Zipformer-68M, 12 sn'lik 3 cümlelik örnek (az veri):
+kesin metin p95 ~150 ms, ara metin p95 ~150 ms, tahmini ekranda gecikme p95 ~1,0 sn
+(700 ms cümle sonu duraklaması dahil), oran 0,08. Türkçe (faster-whisper) bu ortamda ölçülemedi.
+
+## Canlı konuşmacı eşiği — 15 Ekim 2026
+
+CAM++ imzası, 33 gerçek kayıt (sherpa-onnx dil testi sesleri + Zipformer test sesleri): aynı
+kişinin iki yarısı arası kosinüs uzaklığı en fazla 0,37; farklı kayıtlar arası medyan 0,72
+(bazı test sesleri aynı sentetik sesle okunmuş olabilir: en yakın çiftler 0,11-0,16). Varsayılan
+`LIVE_SPEAKER_THRESHOLD=0.5`; gerçek Türkçe soru-cevap kaydıyla doğrulanmalı.
+

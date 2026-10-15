@@ -27,6 +27,8 @@ def transcript_to_dict(t: Transcript) -> dict:
                        for i, u in enumerate(t.utterances)],
         **({"profile": t.profile} if t.profile != "full" else {}),
         **({"quality": t.quality} if t.quality else {}),
+        # aşama süreleri (sn): yavaşlığın nereden geldiği görülsün (dil, vad, asr, guvenlik_agi...)
+        **({"timings": dict(t.timings)} if t.timings else {}),
     }
 
 

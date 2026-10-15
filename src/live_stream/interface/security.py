@@ -59,3 +59,11 @@ def callback_problem(url: str | None, settings: Settings) -> str | None:
             return (f"callback iç ağ adresine gidiyor ({ip}); iç ağ alıcısıysa "
                     "WEBHOOK_ALLOWED_HOSTS'a ekleyin")
     return None
+
+
+def key_ok(settings: Settings, provided: str | None) -> bool:
+    """API_KEY tanımlı değilse herkes; tanımlıysa yalnızca doğru anahtar (sabit süreli karşılaştırma).
+    Canlı altyazı WebSocket'i için: tarayıcı WebSocket'e başlık ekleyemez, anahtar ?key= ile gelir."""
+    if not settings.api_key:
+        return True
+    return hmac.compare_digest(provided or "", settings.api_key)

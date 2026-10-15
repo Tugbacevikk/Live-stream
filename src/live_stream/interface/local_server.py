@@ -27,6 +27,7 @@ import uuid
 from live_stream.application.jobs import DetectLanguage, RunTranscription, SubmitJob
 from live_stream.domain import AudioJob
 from live_stream.infrastructure.audio import SoundfileLoader
+from live_stream.infrastructure.recorder import delete_old_recordings
 from live_stream.infrastructure.sherpa_vad import SileroVad
 from live_stream.infrastructure.thread_queue import ThreadJobQueue
 from live_stream.infrastructure.webhook import OutboxDispatcher
@@ -124,6 +125,10 @@ def main(argv=None):
         while True:
             try:
                 app.state.maintenance.run_once()
+                n = delete_old_recordings(s.recordings_dir, s.recordings_retention_days)
+                if n:
+                    log.info("bakım: %d eski canlı oturum dosyası silindi (RECORDINGS_RETENTION_DAYS=%g)",
+                             n, s.recordings_retention_days)
             except Exception:
                 log.exception("bakım turu başarısız")
             time.sleep(60)

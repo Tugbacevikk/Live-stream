@@ -56,3 +56,27 @@ class SessionRecorder:
                 f.close()
             except Exception:
                 pass
+
+
+def delete_old_recordings(directory: str | Path, older_than_days: float, now: float | None = None) -> int:
+    """recordings/ altında son değişikliği older_than_days günden eski oturum dosyalarını siler
+    (.wav, .txt, .jsonl). Açık oturumun dosyaları sürekli yazıldığı için silinmez. 0 = silme.
+    Silinen dosya sayısını döndürür."""
+    import time
+
+    if older_than_days <= 0:
+        return 0
+    d = Path(directory)
+    if not d.is_dir():
+        return 0
+    limit = (now if now is not None else time.time()) - older_than_days * 86400
+    n = 0
+    for f in d.iterdir():
+        if f.suffix in (".wav", ".txt", ".jsonl") and f.is_file():
+            try:
+                if f.stat().st_mtime < limit:
+                    f.unlink()
+                    n += 1
+            except OSError:
+                pass
+    return n

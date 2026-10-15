@@ -96,6 +96,7 @@
     <label class="check"><input id="save" type="checkbox" checked> Sesi ve metni diske kaydet</label>
     <label class="check"><input id="analyze" type="checkbox" checked> Bitince konuşmacı ayrımlı transkript hazırla</label>
     <label class="check"><input id="ns" type="checkbox" checked> Tarayıcı gürültü bastırma</label>
+    <label id="keyRow" hidden>API anahtarı<input id="apiKey" type="password" autocomplete="off" placeholder="sunucu istiyor"></label>
   </div>
 </details>
 
@@ -107,6 +108,10 @@ const $ = (id) => document.getElementById(id);
 const stage = $("stage"), partialEl = $("partial");
 let ws = null, ctx = null, node = null, src = null, mic = null, wakeLock = null;
 let running = false, source = null, retryTimer = null, offset = 0, sent = 0;
+// kopunca aynı oturuma dönmek için: sunucunun verdiği kimlik ve belirteç, alınan son satır
+let sessionId = null, resumeToken = null, lastId = -1, gotReady = false, fatal = false;
+// bağlantı yokken çekilen ses (100 ms'lik paketler); bağlantı gelince gönderilir, en fazla 60 sn
+const pending = [], PENDING_MAX = 600;
 const transcript = [];
 
 /* ---------- Ses yakalama: AudioWorklet ile 16 kHz Int16 paketler ---------- */
@@ -160,7 +165,8 @@ async function openAudio(kind) {
   node = new AudioWorkletNode(ctx, "pcm16");
   node.port.onmessage = ({ data }) => {
     $("lvl").style.width = Math.min(100, data.rms * 600) + "%";
-    if (ws && ws.readyState === 1) { sent += data.pcm.byteLength / 2; ws.send(data.pcm); }
+    if (ws && ws.readyState === 1 && gotReady) { sent += data.pcm.byteLength / 2; ws.send(data.pcm); }
+    else if (running) { pending.push(data.pcm); if (pending.length > PENDING_MAX) pending.shift(); }
   };
   src.connect(node);
   if (src.start) src.start();
@@ -177,12 +183,15 @@ function closeAudio() {
 
 /* ---------- Sunucu bağlantısı ---------- */
 function connect() {
-  offset = sent / 16000;  // yeniden bağlanınca zaman damgaları kaldığı yerden devam etsin
+  gotReady = false; fatal = false;
   const p = new URLSearchParams({
     language: $("langSel").value,
     silence_ms: $("silence_ms").value, partial_sec: $("partial_sec").value,
     max_sec: $("max_sec").value, save: $("save").checked ? "1" : "0",
     analyze: $("save").checked && $("analyze").checked ? "1" : "0" });
+  const key = $("apiKey").value.trim();
+  if (key) p.set("key", key);
+  if (sessionId) { p.set("resume", sessionId); p.set("token", resumeToken); p.set("after", lastId); }
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws/live?${p}`);
   ws.binaryType = "arraybuffer";
@@ -190,7 +199,14 @@ function connect() {
   ws.onmessage = async (e) => {
     const m = JSON.parse(e.data);
     if (m.type === "ready") {
-      setStatus("Dinleniyor", "live");
+      if (!m.resumed) {
+        // yeni oturum: sunucunun zamanı sıfırdan başlar; önceki oturumların sesi kadar kaydır
+        offset = sent / 16000; lastId = -1;
+        if (sessionId) setStatus("Önceki oturum kapanmıştı, yeni oturum başladı");
+      }
+      sessionId = m.session_id; resumeToken = m.resume_token; gotReady = true;
+      while (pending.length) { const b = pending.shift(); sent += b.byteLength / 2; ws.send(b); }
+      setStatus(m.resumed ? "Dinleniyor (bağlantı geri geldi)" : "Dinleniyor", "live");
       if (m.model) showModel(m.model, m.device, m.language);
       else { $("dev").hidden = false; $("dev").textContent = "dil bekleniyor…"; }
       if (!ctx) {
@@ -209,8 +225,10 @@ function connect() {
     } else if (m.type === "stats") {
       $("lag").hidden = false; $("lag").textContent = `gecikme ${m.lag_sec.toFixed(1)} sn`;
     } else if (m.type === "error") {
+      if (!gotReady) fatal = true;  // bağlantı reddedildi (anahtar, ayar): yeniden denemek boşuna
       setStatus("Hata: " + m.message);
     } else if (m.type === "done") {
+      sessionId = null;
       setStatus(m.webhook ? "Tamamlandı · bildirim gönderildi" : "Tamamlandı", "ok");
       if (m.job_id) {
         $("jobLink").href = "/?job=" + encodeURIComponent(m.job_id);
@@ -220,10 +238,14 @@ function connect() {
   };
 
   ws.onclose = () => {
-    ws = null;
-    if (running) {
-      // Beklenmedik kopma: ses açık kalır, 1,5 sn sonra yeniden bağlan
-      setStatus("Bağlantı koptu, yeniden bağlanılıyor…");
+    ws = null; gotReady = false;
+    if (running && fatal) {
+      running = false; closeAudio(); resetButtons(); pending.length = 0;
+      wakeLock?.release().catch(() => {}); wakeLock = null;
+      $("keyRow").hidden = false;
+    } else if (running) {
+      // Beklenmedik kopma: ses açık kalır ve biriktirilir, 1,5 sn sonra aynı oturuma dön
+      setStatus("Bağlantı koptu, yeniden bağlanılıyor… (ses biriktiriliyor)");
       retryTimer = setTimeout(connect, 1500);
     }
   };
@@ -235,6 +257,8 @@ function fmt(sec) {
   return (h ? h + ":" : "") + String(m).padStart(h ? 2 : 1, "0") + ":" + String(s % 60).padStart(2, "0");
 }
 function addLine(m) {
+  if (m.id <= lastId) return;  // geri bağlanınca yeniden gönderilen satır zaten ekranda
+  lastId = m.id;
   $("empty")?.remove();
   const start = m.start + offset;
   transcript.push({ start, text: m.text });
@@ -270,6 +294,7 @@ function resetButtons() {
 async function start(kind) {
   if (running) return;
   running = true; source = kind; offset = 0; sent = 0; $("jobLink").hidden = true;
+  sessionId = null; resumeToken = null; lastId = -1; pending.length = 0;
   $("startBtn").disabled = true; $("fileIn").disabled = true; $("stopBtn").disabled = false; $("micSel").disabled = true; $("langSel").disabled = true;
   setStatus("Model hazırlanıyor…");
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
@@ -303,6 +328,7 @@ listMics();
 async function listLangs() {
   try {
     const h = await (await fetch("/live/health")).json();
+    $("keyRow").hidden = !h.auth;
     const opts = h.languages.map((l) => `<option value="${l.code}">${l.name}</option>`);
     if (h.auto) opts.push('<option value="auto">Otomatik (ilk cümleden)</option>');
     $("langSel").innerHTML = opts.join("");
@@ -311,6 +337,8 @@ async function listLangs() {
     if (want) $("langSel").value = want;
   } catch {}
 }
+try { $("apiKey").value = localStorage.getItem("asr_api_key") || ""; } catch {}
+$("apiKey").onchange = () => { try { localStorage.setItem("asr_api_key", $("apiKey").value.trim()); } catch {} };
 $("langSel").onchange = () => { try { localStorage.setItem("captionLang", $("langSel").value); } catch {} };
 listLangs();
 

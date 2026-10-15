@@ -213,7 +213,7 @@ def fake_engines():
             "vi": LiveEngine(lambda: FakeLiveAsr("vi:"), "sahte-vi")}
 
 
-def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, detect=None):
+def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, detect=None, **settings):
     """Yerel sunucu (toplu iş + canlı altyazı), modeller yerine sahte nesnelerle."""
     from live_stream.interface import local_server
     from live_stream.interface.settings import Settings
@@ -224,7 +224,7 @@ def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, dete
     # dil tespiti modeli (Whisper-tiny) yerine boş: canlı tespit testte 'detect' ile verilir
     monkeypatch.setattr(local_server, "build_resolver", lambda cfg: LanguageResolver(list(cfg.languages), []))
     s = Settings(data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"),
-                 languages=list(languages), live_language="tr")
+                 languages=list(languages), live_language="tr", **settings)
     engines = engines or {k: v for k, v in fake_engines().items() if k in languages}
     app, store, queue, _ = local_server.build_local(s, workers=1, warm_up=False, live_engines=engines,
                                                     live_detector=EnergyDetector, live_detect=detect)
@@ -385,10 +385,10 @@ def test_oturum_bitince_live_ended_ve_toplu_ise_ayni_adres(tmp_path, monkeypatch
     assert job.callback_url == HOOK and job.external_id == f"live:{done['session_id']}"
 
 
-def test_oturum_basina_callback_adresi_ve_analizsiz_oturum(local):
-    app, store, sent, _ = local                      # LIVE_WEBHOOK_URL yok
+def test_oturum_basina_callback_adresi_ve_analizsiz_oturum(tmp_path, monkeypatch):
+    app, store, sent = make_local(tmp_path, monkeypatch, api_key="k")   # LIVE_WEBHOOK_URL yok
     with TestClient(app) as client:
-        _, _, done = session(client, f"/ws/live?analyze=0&callback_url={HOOK}", TWO)
+        _, _, done = session(client, f"/ws/live?key=k&analyze=0&callback_url={HOOK}", TWO)
     assert done["webhook"] is True and done["job_id"] is None and sent == []
     [row] = outbox(store, "live.ended")
     assert row["url"] == HOOK and row["job_id"] is None and row["payload"]["job_id"] is None
@@ -402,18 +402,26 @@ def test_adres_yoksa_bildirim_yok(local):
     assert done["webhook"] is False and outbox(store) == []
 
 
-def test_gecersiz_callback_reddedilir(local):
-    app, store, _, _ = local
-    with TestClient(app) as client, client.websocket_connect("/ws/live?callback_url=ftp://x/y") as ws:
+def test_gecersiz_callback_reddedilir(tmp_path, monkeypatch):
+    app, store, _ = make_local(tmp_path, monkeypatch, api_key="k")
+    with TestClient(app) as client, client.websocket_connect("/ws/live?key=k&callback_url=ftp://x/y") as ws:
         m = ws.receive_json()
     assert m["type"] == "error" and "http" in m["message"] and outbox(store) == []
+
+
+def test_anahtarsiz_sunucuda_oturum_basina_adres_verilemez(local):
+    """API_KEY yokken herkes bağlanabilir: sunucuya istediği adrese istek attıramasın."""
+    app, store, _, _ = local
+    with TestClient(app) as client, client.websocket_connect(f"/ws/live?callback_url={HOOK}") as ws:
+        m = ws.receive_json()
+    assert m["type"] == "error" and "API_KEY" in m["message"] and outbox(store) == []
 
 
 def test_baglanti_koparsa_da_bildirilir(tmp_path, monkeypatch):
     import time
 
     monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
-    app, store, sent = make_local(tmp_path, monkeypatch)
+    app, store, sent = make_local(tmp_path, monkeypatch, live_resume_sec=0.3)  # geri dönülmezse kapanır
     with TestClient(app) as client:
         with client.websocket_connect("/ws/live?partial_sec=0") as ws:
             ws.receive_json()
@@ -435,3 +443,122 @@ def test_otomatik_dilde_bildirimde_tespit_bilgisi(tmp_path, monkeypatch):
         session(client, "/ws/live?language=auto&partial_sec=0", TWO)
     [row] = outbox(store, "live.ended")
     assert row["payload"]["language"] == {"code": "vi", "source": "tespit", "confidence": 0.91}
+
+
+# ------------------------------------------------------------------- erişim anahtarı
+def test_anahtar_tanimliysa_canli_baglanti_ister(tmp_path, monkeypatch):
+    app, _, _ = make_local(tmp_path, monkeypatch, api_key="gizli")
+    with TestClient(app) as client:
+        assert client.get("/live/health").json()["auth"] is True
+        for url in ("/ws/live", "/ws/live?key=yanlis"):
+            with client.websocket_connect(url) as ws:
+                m = ws.receive_json()
+            assert m["type"] == "error" and "anahtar" in m["message"]
+        with client.websocket_connect("/ws/live?key=gizli") as ws:          # sorgu parametresi
+            assert ws.receive_json()["type"] == "ready"
+        with client.websocket_connect("/ws/live", headers={"X-API-Key": "gizli"}) as ws:  # başlık
+            assert ws.receive_json()["type"] == "ready"
+
+
+# ------------------------------------------------------------------- kopunca devam
+def wait_for(cond, sec=5.0):
+    import time
+
+    for _ in range(int(sec / 0.05)):
+        if cond():
+            return True
+        time.sleep(0.05)
+    return cond()
+
+
+def test_kopan_oturum_ayni_kayit_ve_satirlarla_devam_eder(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
+    app, store, sent = make_local(tmp_path, monkeypatch, live_resume_sec=5)
+    first = np.concatenate([tone(1.5), silence(1.0)])
+    second = np.concatenate([tone(2.5), silence(1.0)])
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live?partial_sec=0") as ws:
+            ready = ws.receive_json()
+            assert ready["resumed"] is False and ready["resume_token"]
+            speak(ws, first)
+            got = [ws.receive_json() for _ in range(2)]            # final + stats
+        sid, tok = ready["session_id"], ready["resume_token"]
+        assert [m["type"] for m in got] == ["final", "stats"] and got[0]["id"] == 0
+        assert wait_for(lambda: sid in app.state.live_runs and app.state.live_runs[sid].ws is None)
+        assert outbox(store) == [] and sent == []                   # henüz kapanmadı
+
+        _, msgs, done = session(client, f"/ws/live?resume={sid}&token={tok}&after=0&partial_sec=0", second)
+    finals = [m for m in msgs if m["type"] == "final"]
+    assert [m["id"] for m in finals] == [1]                         # numaralar sürüyor, tekrar yok
+    assert finals[0]["start"] == pytest.approx(len(first) / SR, abs=0.35)  # zaman da sürüyor
+    assert done["session_id"] == sid
+    wavs = list((tmp_path / "rec").glob("*.wav"))
+    assert len(wavs) == 1                                           # tek kayıt
+    data, _ = sf.read(wavs[0])
+    assert len(data) == len(first) + len(second)
+    [row] = outbox(store, "live.ended")                             # tek bildirim, tek toplu iş
+    assert [ln["id"] for ln in row["payload"]["lines"]] == [0, 1] and row["payload"]["reason"] == "stop"
+    assert len(sent) == 1
+
+
+def test_kopukken_kesinlesen_satir_donunce_gonderilir(tmp_path, monkeypatch):
+    app, _, _ = make_local(tmp_path, monkeypatch, live_resume_sec=5)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live?partial_sec=0") as ws:
+            ready = ws.receive_json()
+            speak(ws, np.concatenate([tone(1.5), silence(1.0)]))
+        sid, tok = ready["session_id"], ready["resume_token"]
+        run = app.state.live_runs[sid]
+        assert wait_for(lambda: run.session.lines == 1)            # istemci bu satırı almadı
+        with client.websocket_connect(f"/ws/live?resume={sid}&token={tok}&after=-1") as ws:
+            assert ws.receive_json()["resumed"] is True
+            m = ws.receive_json()
+            ws.send_text('{"type": "stop"}')
+            while ws.receive_json()["type"] != "done":
+                pass
+    assert m["type"] == "final" and m["id"] == 0
+
+
+def test_yanlis_belirtecle_devam_edilemez_yeni_oturum_acilir(tmp_path, monkeypatch):
+    app, _, _ = make_local(tmp_path, monkeypatch, live_resume_sec=5)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live") as ws:
+            sid = ws.receive_json()["session_id"]
+        with client.websocket_connect(f"/ws/live?resume={sid}&token=baskasi") as ws:
+            r = ws.receive_json()
+        assert r["resumed"] is False and r["session_id"] != sid
+        with client.websocket_connect("/ws/live?resume=yok&token=x") as ws:
+            assert ws.receive_json()["resumed"] is False
+
+
+def test_sure_dolunca_oturum_kapanir_ve_bildirilir(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
+    app, store, sent = make_local(tmp_path, monkeypatch, live_resume_sec=0.3)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live?partial_sec=0") as ws:
+            ready = ws.receive_json()
+            speak(ws, np.concatenate([tone(1.5), silence(1.0)]))
+            ws.receive_json()
+        assert wait_for(lambda: outbox(store, "live.ended"))
+        with client.websocket_connect(f"/ws/live?resume={ready['session_id']}&token={ready['resume_token']}") as ws:
+            assert ws.receive_json()["resumed"] is False          # süre doldu: yeni oturum
+    [row] = outbox(store, "live.ended")
+    assert row["payload"]["reason"] == "disconnect" and len(sent) == 1
+
+
+def test_eski_canli_kayitlar_silinir(tmp_path):
+    import os
+    import time
+
+    from live_stream.infrastructure.recorder import delete_old_recordings
+
+    now = time.time()
+    for name, age_days in (("eski.wav", 40), ("eski.txt", 40), ("eski.jsonl", 40),
+                           ("yeni.wav", 1), ("not.md", 40)):
+        f = tmp_path / name
+        f.write_text("x")
+        os.utime(f, (now - age_days * 86400,) * 2)
+    assert delete_old_recordings(tmp_path, 0, now) == 0                  # 0 = silme
+    assert delete_old_recordings(tmp_path, 30, now) == 3
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["not.md", "yeni.wav"]
+    assert delete_old_recordings(tmp_path / "yok", 30, now) == 0

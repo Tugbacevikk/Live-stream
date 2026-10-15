@@ -129,6 +129,13 @@ class Settings:
     # ws://.../ws/live?callback_url=... ile de verilebilir. Önce 'live.ended' (canlı metin),
     # konuşmacı ayrımı bitince aynı adrese 'job.done' gider. İmza: WEBHOOK_SECRET.
     live_webhook_url: str = field(default_factory=lambda: os.environ.get("LIVE_WEBHOOK_URL", "").strip())
+    # Bağlantı koparsa oturum bu kadar sn bekler; sayfa geri bağlanırsa aynı oturum sürer
+    # (aynı kayıt, satırlar, dil). 0: beklemeden kapanır.
+    live_resume_sec: float = field(default_factory=lambda: float(os.environ.get("LIVE_RESUME_SEC", "30")))
+    # recordings/ altındaki canlı oturum kayıtları (.wav, .txt, .jsonl) kaç gün sonra silinsin
+    # (0 = silme). Konuşanların sesi kişisel veridir; gerekenden uzun tutmayın.
+    recordings_retention_days: float = field(default_factory=lambda: float(os.environ.get(
+        "RECORDINGS_RETENTION_DAYS", "30")))
     # Oturum bitince kayıt toplu işe gönderilsin: konuşmacı ayrımlı, düzeltilebilir transkript
     live_auto_analyze: bool = field(default_factory=lambda: os.environ.get(
         "LIVE_AUTO_ANALYZE", "true").lower() in ("1", "true", "evet"))

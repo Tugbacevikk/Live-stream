@@ -10,9 +10,14 @@ WebSocket protokolü
                       sorgu parametreleri (isteğe bağlı): language (tr | vi | auto),
                       silence_ms, partial_sec, max_sec, save (1/0),
                       analyze (1/0: oturum sonu toplu işe gönder),
-                      callback_url (oturum bitince bildirim; yoksa LIVE_WEBHOOK_URL)
-  Sunucu -> İstemci : {"type": "ready", "language": "tr"|"auto", "device": "cuda", "model": "...",
+                      callback_url (oturum bitince bildirim; yoksa LIVE_WEBHOOK_URL; API_KEY ister),
+                      key (API_KEY tanımlıysa zorunlu; X-API-Key başlığı da olur),
+                      resume + token + after (kopan oturuma devam: ready'deki session_id ve
+                      resume_token; after = istemcinin aldığı son kesin satırın id'si)
+  Sunucu -> İstemci : {"type": "ready", "session_id": "...", "resume_token": "...",
+                       "resumed": false, "language": "tr"|"auto", "device": "cuda", "model": "...",
                        "recording": "..."}
+                      (resumed: true ise kaçırılan kesin satırlar ardından yeniden gönderilir)
                       {"type": "language", "code": "vi", "confidence": 0.97, "model": "...",
                        "device": "cpu"}   ('auto' seçildiyse ilk cümleden sonra bir kez)
                       {"type": "partial", "start": 3.1, "text": "..."}
@@ -23,6 +28,10 @@ WebSocket protokolü
                       {"type": "done", "session_id": "...", "job_id": "..." | null,
                        "webhook": true}  job_id: konuşmacı ayrımlı transkript için açılan toplu
                       iş (GET /jobs/{job_id}); webhook: oturum sonu bildirimi kuyruğa yazıldı
+
+Kopma: bağlantı beklenmedik koparsa oturum hemen kapanmaz, LIVE_RESUME_SEC (30 sn) bekler.
+İstemci resume+token ile dönerse aynı oturum (aynı kayıt, satır numaraları, dil) sürer;
+dönmezse oturum "disconnect" nedeniyle kapanır (kayıt, toplu iş, bildirim).
 
 Oturum sonu bildirimi (webhook): oturum bitince (Durdur ya da bağlantı kopması) callback
 adresine 'live.ended' gider (canlı metin, dil, süre, job_id); konuşmacı ayrımı bitince aynı
@@ -48,7 +57,7 @@ from live_stream.application.live import (
     FinalJob, LanguageLock, LiveSession, Segmenter, SegmenterConfig, ended_payload,
 )
 from live_stream.infrastructure.recorder import SessionRecorder
-from live_stream.interface.security import callback_problem
+from live_stream.interface.security import callback_problem, key_ok
 
 log = logging.getLogger(__name__)
 _PAGE = Path(__file__).parent / "static" / "canli.html"
@@ -104,6 +113,38 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+class _Run:
+    """Bir canlı oturum: bağlantıdan bağımsız yaşar (kopup geri gelen bağlantı aynı oturuma bağlanır)."""
+
+    def __init__(self, *, session: LiveSession, lock: LanguageLock, recorder, callback: str | None,
+                 analyze: bool, lang: str):
+        self.id, self.token = uuid.uuid4().hex, uuid.uuid4().hex
+        self.session, self.lock, self.recorder = session, lock, recorder
+        self.callback, self.analyze, self.lang = callback, analyze, lang
+        self.started_at = _now()
+        self.finals: asyncio.Queue[FinalJob | None] = asyncio.Queue()
+        self.ws: WebSocket | None = None
+        self.send_lock = asyncio.Lock()
+        self.partial_busy = False
+        self.announced = False
+        self.closed = False          # finish başladı: artık bağlanılamaz
+        self.expiry: asyncio.Task | None = None
+        self.worker: asyncio.Task | None = None
+        # gecikme ölçümü: bu bağlantının ilk ses paketi (duvar saati) ve o andaki akış zamanı
+        self.t_conn: float | None = None
+        self.stream_at_conn = 0.0
+
+    async def send(self, msg: dict | None) -> None:
+        ws = self.ws
+        if msg is None or ws is None:
+            return  # bağlantı yokken: kesin satırlar items'ta kalır, dönünce yeniden gönderilir
+        async with self.send_lock:
+            try:
+                await ws.send_json(msg)
+            except Exception:
+                pass
+
+
 def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], detector_factory: Callable,
                     submit_recording: Callable[..., str | None] | None = None,
                     detect_language: Callable | None = None,
@@ -114,6 +155,8 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
     languages = list(engines)
     default = settings.live_language if settings.live_language in (*languages, "auto") else languages[0]
     infer_lock = asyncio.Lock()  # çıkarımlar sırayla: birden çok canlı bağlantı GPU'yu boğmasın
+    runs: dict[str, _Run] = {}   # açık (ya da kopup beklenen) oturumlar
+    app.state.live_runs = runs
 
     async def run(fn, job):
         async with infer_lock:
@@ -132,12 +175,108 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             "default": default,
             "auto": len(languages) > 1 and detect_language is not None,
             "webhook": bool(settings.live_webhook_url and notify_ended),
+            "auth": bool(settings.api_key),
             "ready": all(e.asr is not None for e in engines.values()),
         }
 
-    async def ws_endpoint(ws: WebSocket):
-        await ws.accept()
-        q = ws.query_params
+    async def reject(ws: WebSocket, message: str) -> None:
+        await ws.send_json({"type": "error", "message": message})
+        await ws.close()
+
+    # ------------------------------------------------------------------ oturum işleri
+    async def announce(r: _Run) -> None:
+        """'auto' seçildiyse dil bulununca bir kez bildirir."""
+        if r.lock.detected and not r.announced:
+            r.announced = True
+            e = engines[r.lock.code]
+            await r.send({"type": "language", "code": r.lock.code, "confidence": r.lock.confidence,
+                          "model": e.model_name, "device": e.device})
+
+    async def final_worker(r: _Run) -> None:
+        while (job := await r.finals.get()) is not None:
+            try:
+                msg = await run(r.session.run_final, job)
+                await announce(r)
+                await r.send(msg)
+                if r.t_conn is not None:
+                    # gecikme: konuşmanın bittiği an ile metnin hazır olduğu an arası
+                    lag = (time.monotonic() - r.t_conn) - (job.end - r.stream_at_conn)
+                    await r.send({"type": "stats", "lag_sec": round(max(0.0, lag), 2)})
+            except Exception as e:
+                log.exception("kesin metin üretilemedi")
+                await r.send({"type": "error", "message": str(e)})
+
+    async def partial_task(r: _Run, job) -> None:
+        try:
+            if r.finals.empty():  # bekleyen kesin metin varsa ara metin gereksiz
+                msg = await run(r.session.run_partial, job)
+                await announce(r)
+                await r.send(msg)
+        except Exception as e:
+            log.warning("ara metin hatası: %s", e)
+        finally:
+            r.partial_busy = False
+
+    async def finish(r: _Run, reason: str) -> tuple[str | None, bool]:
+        """Kalan cümleleri işler, kaydı kapatır, istenirse toplu işe gönderir ve oturum
+        sonu bildirimini yazar. -> (toplu iş kimliği, bildirim yazıldı mı)"""
+        r.closed = True
+        if r.expiry is not None and r.expiry is not asyncio.current_task():
+            r.expiry.cancel()
+        runs.pop(r.id, None)
+        for job in r.session.segmenter.flush():
+            r.finals.put_nowait(job)
+        r.finals.put_nowait(None)
+        try:
+            await asyncio.wait_for(r.worker, timeout=60)
+        except Exception:
+            r.worker.cancel()
+        path = r.session.close()
+        job_id = None
+        if r.analyze and path and submit_recording and r.session.lines:
+            try:  # toplu iş aynı callback'i alır: konuşmacı ayrımı bitince 'job.done'
+                job_id = await asyncio.to_thread(submit_recording, path, r.lock.code, r.callback, r.id)
+            except Exception as e:
+                log.warning("kayıt toplu işe gönderilemedi: %s", e)
+        if not (r.callback and notify_ended):
+            return job_id, False
+        payload = ended_payload(r.id, r.lock, r.session.items, started_at=r.started_at,
+                                ended_at=_now(), duration=r.session.segmenter.stream_time,
+                                reason=reason, job_id=job_id,
+                                recording=r.recorder.name if r.recorder else None)
+        try:
+            await asyncio.to_thread(notify_ended, r.callback, payload, job_id)
+            return job_id, True
+        except Exception as e:  # bildirim yazılamadı: oturum yine de düzgün kapansın
+            log.exception("oturum sonu bildirimi yazılamadı: %s", e)
+            return job_id, False
+
+    def background(coro) -> asyncio.Task:
+        """İptalden korunan görev: bağlantı işleyicisi iptal edilse de (sunucu kapanışı,
+        istemci kütüphanesinin iptali) kayıt kapanır ve bildirim yazılır."""
+        task = asyncio.get_running_loop().create_task(coro)
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+        return task
+
+    async def expire(r: _Run, after: float) -> None:
+        await asyncio.sleep(after)
+        if r.ws is None and not r.closed:
+            log.info("canlı oturum %s: %.0f sn içinde geri bağlanılmadı, kapatılıyor", r.id, after)
+            await finish(r, "disconnect")
+
+    def park(r: _Run) -> asyncio.Task | None:
+        """Bağlantı koptu: oturum LIVE_RESUME_SEC bekler; dönülmezse kapanır."""
+        r.ws = None
+        if r.closed:
+            return None
+        if settings.live_resume_sec <= 0:
+            return background(finish(r, "disconnect"))
+        r.expiry = background(expire(r, settings.live_resume_sec))
+        return None
+
+    # ------------------------------------------------------------------ bağlantı
+    async def new_run(ws: WebSocket, q) -> _Run | None:
         try:
             seg_cfg = SegmenterConfig(
                 end_silence_ms=int(q.get("silence_ms", settings.end_silence_ms)),
@@ -147,34 +286,33 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             save = q.get("save", "1" if settings.save_recordings else "0") == "1"
             analyze = save and q.get("analyze", "1" if settings.live_auto_analyze else "0") == "1"
         except ValueError:
-            await ws.send_json({"type": "error", "message": "Geçersiz ayar değeri."})
-            await ws.close()
-            return
-        callback = (q.get("callback_url") or settings.live_webhook_url or "").strip() or None
+            await reject(ws, "Geçersiz ayar değeri.")
+            return None
+        asked = (q.get("callback_url") or "").strip() or None
+        if asked and asked != settings.live_webhook_url and not settings.api_key:
+            # anahtarsız biri sunucuya istediği adrese istek attıramasın
+            await reject(ws, "Oturum başına callback_url için sunucuda API_KEY tanımlı olmalı "
+                             "(ya da adresi LIVE_WEBHOOK_URL ile verin).")
+            return None
+        callback = asked or settings.live_webhook_url or None
         problem = callback_problem(callback, settings)
         if problem:
-            await ws.send_json({"type": "error", "message": problem})
-            await ws.close()
-            return
+            await reject(ws, problem)
+            return None
         lang = q.get("language", default).strip().lower()
         if lang == "auto" and (len(languages) == 1 or detect_language is None):
             lang = languages[0]  # tek dil açık: tespit gereksiz
         if lang != "auto" and lang not in engines:
-            await ws.send_json({"type": "error", "message":
-                                f"'{lang}' dili açık değil; seçenekler: {', '.join(languages)}"})
-            await ws.close()
-            return
-
+            await reject(ws, f"'{lang}' dili açık değil; seçenekler: {', '.join(languages)}")
+            return None
         try:  # dil belliyse onun modeli, 'auto' ise hepsi hazır olsun
             for code in ([lang] if lang != "auto" else languages):
                 await engines[code].wait_ready()
         except Exception as e:
-            await ws.send_json({"type": "error", "message": f"Model yüklenemedi: {e}"})
-            await ws.close()
-            return
+            await reject(ws, f"Model yüklenemedi: {e}")
+            return None
 
         lock = LanguageLock(None if lang == "auto" else lang, detect_language, fallback=languages[0])
-        session_id, started_at = uuid.uuid4().hex, _now()
 
         def transcribe(audio, fast, prompt):
             code = lock.decide(audio, final=not fast)
@@ -182,93 +320,50 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
 
         detector = await asyncio.to_thread(detector_factory)
         recorder = SessionRecorder(settings.recordings_dir) if save else None
-        session = LiveSession(Segmenter(detector, seg_cfg), transcribe, recorder)
+        r = _Run(session=LiveSession(Segmenter(detector, seg_cfg), transcribe, recorder), lock=lock,
+                 recorder=recorder, callback=callback, analyze=analyze, lang=lang)
+        r.worker = asyncio.create_task(final_worker(r))
+        runs[r.id] = r
+        return r
 
-        finals: asyncio.Queue[FinalJob | None] = asyncio.Queue()
-        send_lock = asyncio.Lock()
-        partial_busy = False
-        announced = False
-        t_start: float | None = None  # ilk ses paketinin geldiği an
+    def ready_msg(r: _Run, resumed: bool) -> dict:
+        code = r.lock.code
+        e = engines[code] if code else None
+        return {"type": "ready", "session_id": r.id, "resume_token": r.token, "resumed": resumed,
+                "language": r.lang if not resumed or not code else code,
+                "device": e.device if e else None, "model": e.model_name if e else None,
+                "recording": r.recorder.name if r.recorder else None}
 
-        async def send(msg: dict | None):
-            if msg is None:
+    async def ws_endpoint(ws: WebSocket):
+        await ws.accept()
+        q = ws.query_params
+        if not key_ok(settings, q.get("key") or ws.headers.get("x-api-key")):
+            await reject(ws, "Geçersiz ya da eksik API anahtarı (sayfadaki Ayarlar > API anahtarı).")
+            return
+
+        r, resumed = None, False
+        old = runs.get(q.get("resume") or "")
+        if old is not None and not old.closed and old.ws is None and q.get("token") == old.token:
+            if old.expiry is not None:
+                old.expiry.cancel()
+                old.expiry = None
+            r, resumed = old, True
+            log.info("canlı oturum %s: bağlantı geri geldi", r.id)
+        if r is None:
+            r = await new_run(ws, q)
+            if r is None:
                 return
-            async with send_lock:
-                try:
-                    await ws.send_json(msg)
-                except Exception:
-                    pass
-
-        async def announce():
-            """'auto' seçildiyse dil bulununca bir kez bildirir."""
-            nonlocal announced
-            if lock.detected and not announced:
-                announced = True
-                e = engines[lock.code]
-                await send({"type": "language", "code": lock.code, "confidence": lock.confidence,
-                            "model": e.model_name, "device": e.device})
-
-        async def final_worker():
-            while (job := await finals.get()) is not None:
-                try:
-                    msg = await run(session.run_final, job)
-                    await announce()
-                    await send(msg)
-                    # gecikme: konuşmanın bittiği an ile metnin hazır olduğu an arası
-                    lag = (time.monotonic() - (t_start or time.monotonic())) - job.end
-                    await send({"type": "stats", "lag_sec": round(max(0.0, lag), 2)})
-                except Exception as e:
-                    log.exception("kesin metin üretilemedi")
-                    await send({"type": "error", "message": str(e)})
-
-        async def partial_task(job):
-            nonlocal partial_busy
+        r.ws = ws
+        r.t_conn = None
+        await r.send(ready_msg(r, resumed))
+        if resumed:  # kopukken kesinleşen satırlar
             try:
-                if finals.empty():  # bekleyen kesin metin varsa ara metin gereksiz
-                    msg = await run(session.run_partial, job)
-                    await announce()
-                    await send(msg)
-            except Exception as e:
-                log.warning("ara metin hatası: %s", e)
-            finally:
-                partial_busy = False
-
-        async def finish(reason: str) -> tuple[str | None, bool]:
-            """Kalan cümleleri işler, kaydı kapatır, istenirse toplu işe gönderir ve oturum
-            sonu bildirimini yazar. -> (toplu iş kimliği, bildirim yazıldı mı)"""
-            for job in session.segmenter.flush():
-                finals.put_nowait(job)
-            finals.put_nowait(None)
-            try:
-                await asyncio.wait_for(worker, timeout=60)
-            except Exception:
-                worker.cancel()
-            path = session.close()
-            job_id = None
-            if analyze and path and submit_recording and session.lines:
-                try:  # toplu iş aynı callback'i alır: konuşmacı ayrımı bitince 'job.done'
-                    job_id = await asyncio.to_thread(submit_recording, path, lock.code, callback, session_id)
-                except Exception as e:
-                    log.warning("kayıt toplu işe gönderilemedi: %s", e)
-            if not (callback and notify_ended):
-                return job_id, False
-            payload = ended_payload(session_id, lock, session.items, started_at=started_at,
-                                    ended_at=_now(), duration=session.segmenter.stream_time,
-                                    reason=reason, job_id=job_id,
-                                    recording=recorder.name if recorder else None)
-            try:
-                await asyncio.to_thread(notify_ended, callback, payload, job_id)
-                return job_id, True
-            except Exception as e:  # bildirim yazılamadı: oturum yine de düzgün kapansın
-                log.exception("oturum sonu bildirimi yazılamadı: %s", e)
-                return job_id, False
-
-        worker = asyncio.create_task(final_worker())
-        first = engines[lang] if lang != "auto" else None
-        await send({"type": "ready", "language": lang,
-                    "device": first.device if first else None,
-                    "model": first.model_name if first else None,
-                    "recording": recorder.name if recorder else None})
+                after = int(q.get("after", "-1"))
+            except ValueError:
+                after = -1
+            for item in r.session.items:
+                if item["id"] > after:
+                    await r.send({"type": "final", **item})
 
         finished = False
         try:
@@ -277,14 +372,14 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
                 if msg["type"] == "websocket.disconnect":
                     break
                 if msg.get("bytes"):
-                    if t_start is None:
-                        t_start = time.monotonic()
-                    for job in session.feed_pcm16(msg["bytes"]):
+                    if r.t_conn is None:
+                        r.t_conn, r.stream_at_conn = time.monotonic(), r.session.segmenter.stream_time
+                    for job in r.session.feed_pcm16(msg["bytes"]):
                         if isinstance(job, FinalJob):
-                            finals.put_nowait(job)
-                        elif not partial_busy:  # yetişemiyorsak ara metni atla, gecikme birikmesin
-                            partial_busy = True
-                            asyncio.create_task(partial_task(job))
+                            r.finals.put_nowait(job)
+                        elif not r.partial_busy:  # yetişemiyorsak ara metni atla, gecikme birikmesin
+                            r.partial_busy = True
+                            asyncio.create_task(partial_task(r, job))
                 elif msg.get("text"):
                     try:
                         data = json.loads(msg["text"])
@@ -292,25 +387,21 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
                         continue
                     if data.get("type") == "stop":
                         finished = True
-                        job_id, notified = await finish("stop")
-                        await send({"type": "done", "session_id": session_id, "job_id": job_id,
-                                    "webhook": notified})
+                        job_id, notified = await finish(r, "stop")
+                        await r.send({"type": "done", "session_id": r.id, "job_id": job_id,
+                                      "webhook": notified})
                         await ws.close()
                         break
         except WebSocketDisconnect:
             pass
         finally:
-            if not finished:
-                # bağlantı koptu: kalan cümleler yine de kayda geçer, analiz edilir, bildirilir.
-                # Ayrı görev + shield: bu işleyici iptal edilse de (sunucu kapanışı, istemci
-                # kütüphanesinin iptali) kayıt kapanır ve bildirim yazılır.
-                task = asyncio.get_running_loop().create_task(finish("disconnect"))
-                _background.add(task)
-                task.add_done_callback(_background.discard)
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    pass
+            if not finished and r.ws is ws:
+                task = park(r)
+                if task is not None:
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        pass
 
     app.add_api_websocket_route("/ws/live", ws_endpoint)
     app.add_api_websocket_route("/ws", ws_endpoint)

@@ -132,7 +132,13 @@ iki bildirim gider, ikisi de aynı adrese ve aynı kurallarla (imza, tekrar, öl
    işin `external_id`'si `live:<session_id>`.
 
 Adres: sunucuda `LIVE_WEBHOOK_URL` (bütün oturumlar) ya da oturum başına
-`ws://<sunucu>/ws/live?callback_url=https://...` (öncelikli). Adres yoksa bildirim gitmez.
+`ws://<sunucu>/ws/live?key=<API_KEY>&callback_url=https://...` (öncelikli; sunucuda `API_KEY`
+tanımlı olmalı, anahtarsız biri sunucuya istediği adrese istek attıramasın). Adres yoksa
+bildirim gitmez.
+
+Bağlantı kısa süre koparsa (`LIVE_RESUME_SEC`, varsayılan 30 sn) oturum bitmiş sayılmaz: istemci
+`resume=<session_id>&token=<resume_token>&after=<son satır id>` ile döner, aynı oturum sürer ve
+tek bir `live.ended` gider. Süre dolarsa oturum `reason: "disconnect"` ile kapanır.
 Adres, `callback_url` ile aynı denetimden geçer (production'da iç ağ adresleri yalnızca
 `WEBHOOK_ALLOWED_HOSTS` ile).
 

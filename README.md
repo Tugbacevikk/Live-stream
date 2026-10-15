@@ -86,9 +86,16 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
 - **Oturum sonu bildirimi (webhook):** `LIVE_WEBHOOK_URL` tanımlıysa konuşma bitince
   (Durdur ya da bağlantı kopması) o adrese önce `live.ended` (canlı metin, dil, süre), konuşmacı
   ayrımı bitince `job.done` (kimin ne söylediği) gider; imzalı ve tekrar denemeli.
-  Oturum başına da verilebilir: `/ws/live?callback_url=...`. Ayrıntı:
+  Oturum başına da verilebilir: `/ws/live?callback_url=...` (sunucuda `API_KEY` gerekir). Ayrıntı:
   [docs/entegrasyon.md](docs/entegrasyon.md#41-canlı-oturum-bitti-liveended).
-- **Bağlantı koparsa** ses kesilmeden yeniden bağlanır; ekran uykusu engellenir.
+- **Bağlantı koparsa** sayfa aynı oturuma geri bağlanır (`LIVE_RESUME_SEC`, varsayılan 30 sn):
+  kayıt, satır numaraları ve dil sürer; kopukken çekilen ses tarayıcıda biriktirilip bağlantı
+  gelince gönderilir, kopukken kesinleşen satırlar da yeniden gelir. Süre dolarsa oturum
+  "disconnect" nedeniyle kapanır (kayıt, analiz, bildirim yine yapılır). Ekran uykusu engellenir.
+- **Erişim:** `API_KEY` tanımlıysa canlı bağlantı da anahtar ister (sayfada Ayarlar > API
+  anahtarı; dosya sayfasıyla aynı yerde saklanır). Sunucuyu ağa açacaksanız mutlaka tanımlayın.
+- **Kayıtların saklanması:** `recordings/` altındaki dosyalar `RECORDINGS_RETENTION_DAYS`
+  (varsayılan 30) gün sonra silinir; konuşanların sesi kişisel veridir.
 
 **Konferans ipuçları**
 
@@ -161,6 +168,9 @@ Canlı altyazı bu modda yoktur; o, konuşmacının kendi bilgisayarında yerel 
 | `LIVE_AUTO_ANALYZE` | `true` | Oturum bitince konuşmacı ayrımlı transkript |
 | `LIVE_WEBHOOK_URL` | — | Oturum bitince bildirim adresi (`live.ended`, sonra `job.done`) |
 | `WEBHOOK_SECRET` | — | Bildirim imzası (HMAC-SHA256) |
+| `API_KEY` | — | Tanımlıysa API ve canlı bağlantı anahtar ister |
+| `LIVE_RESUME_SEC` | `30` | Kopan canlı oturumun geri bağlanma için beklediği süre |
+| `RECORDINGS_RETENTION_DAYS` | `30` | Canlı oturum kayıtlarının saklanma süresi (0 = silme) |
 | `NUM_SPEAKERS` | `0` | 0 = sesten bul |
 | `CONCURRENCY` | `auto` | Aynı anda işlenen dosya; çekirdek ve belleğe göre |
 

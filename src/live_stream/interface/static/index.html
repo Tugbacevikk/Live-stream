@@ -268,6 +268,12 @@ function poll(jobId, t0) {
 }
 
 // --- sonuç ---
+const STAGE = { yukleme: "yükleme", vad: "konuşma bulma", dil: "dil", asr: "metin",
+  guvenlik_agi: "boşluk kurtarma", konusmaci: "konuşmacı", birlestirme: "birleştirme" };
+
+// işlem süresinin aşamalarda görünmeyen kısmı: kuyrukta bekleme + ayrı dil tespiti işi
+const rest = (took, t) => took - (t.toplam ?? Object.values(t).reduce((a, b) => a + b, 0));
+
 function show(job) {
   current = job;
   const r = job.result;
@@ -285,6 +291,10 @@ function show(job) {
     ["Model", r.model],
     ...(r.quality && r.quality.kapsama_yuzde !== undefined ? [["Kapsama",
       `%${r.quality.kapsama_yuzde}` + (r.quality.kurtarilan_kelime ? ` (+${r.quality.kurtarilan_kelime} kurtarılan)` : "")]] : []),
+    ...(r.timings ? [["Aşamalar (sn)", Object.entries(r.timings).filter(([k, v]) => k !== "toplam" && v >= 0.1)
+      .map(([k, v]) => `${STAGE[k] || k} ${v.toFixed(1)}`)
+      .concat(rest(took, r.timings) >= 0.5 ? [`sıra/dil tespiti ${rest(took, r.timings).toFixed(1)}`] : [])
+      .join(" · ")]] : []),
   ];
   for (const [k, v] of items) meta.append(el("div", {}, el("b", {}, k), el("span", {}, v)));
   const box = $("utts");

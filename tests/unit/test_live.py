@@ -213,7 +213,8 @@ def fake_engines():
             "vi": LiveEngine(lambda: FakeLiveAsr("vi:"), "sahte-vi")}
 
 
-def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, detect=None, **settings):
+def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, detect=None, trackers=None,
+               **settings):
     """Yerel sunucu (toplu iş + canlı altyazı), modeller yerine sahte nesnelerle."""
     from live_stream.interface import local_server
     from live_stream.interface.settings import Settings
@@ -227,7 +228,8 @@ def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, dete
                  languages=list(languages), live_language="tr", **settings)
     engines = engines or {k: v for k, v in fake_engines().items() if k in languages}
     app, store, queue, _ = local_server.build_local(s, workers=1, warm_up=False, live_engines=engines,
-                                                    live_detector=EnergyDetector, live_detect=detect)
+                                                    live_detector=EnergyDetector, live_detect=detect,
+                                                    live_speakers=trackers)
     sent = []
     queue.enqueue_transcription = lambda job_id, lang: sent.append((job_id, lang))
     queue.enqueue_detection = lambda job_id: sent.append((job_id, "lid"))
@@ -562,3 +564,78 @@ def test_eski_canli_kayitlar_silinir(tmp_path):
     assert delete_old_recordings(tmp_path, 30, now) == 3
     assert sorted(f.name for f in tmp_path.iterdir()) == ["not.md", "yeni.wav"]
     assert delete_old_recordings(tmp_path / "yok", 30, now) == 0
+
+
+# ------------------------------------------------------------------- canlı konuşmacı etiketi
+def unit(*v):
+    v = np.asarray(v, dtype=float)
+    return v / np.linalg.norm(v)
+
+
+def test_konusmaci_izleyici_yakin_imza_ayni_kisi_uzak_yeni_kisi():
+    from live_stream.application.live import SpeakerTracker
+
+    seq = iter([unit(1, 0, 0), unit(0.95, 0.1, 0), unit(0, 1, 0), unit(0.9, 0.2, 0), unit(0, 0.9, 0.2)])
+    t = SpeakerTracker(lambda a: next(seq), threshold=0.5, min_sec=1.0)
+    labels = [t.assign(tone(2.0)) for _ in range(5)]
+    assert labels == ["speaker_00", "speaker_00", "speaker_01", "speaker_00", "speaker_01"]
+    assert t.count == 2
+
+
+def test_kisa_cumle_onceki_konusmaciya_ve_ust_sinir():
+    from live_stream.application.live import SpeakerTracker
+
+    calls = []
+
+    def embed(a):
+        calls.append(1)
+        return unit(*np.eye(3)[len(calls) % 3])
+
+    t = SpeakerTracker(embed, threshold=0.5, min_sec=1.0, max_speakers=2)
+    assert t.assign(tone(0.5)) is None                   # henüz kimse yok, kısa: etiket yok
+    assert t.assign(tone(2.0)) == "speaker_00"
+    assert t.assign(tone(0.4)) == "speaker_00" and len(calls) == 1   # kısa: imza çıkarılmaz
+    assert t.assign(tone(2.0)) == "speaker_01"
+    assert t.assign(tone(2.0)) in ("speaker_00", "speaker_01") and t.count == 2  # üst sınır
+
+
+def test_oturum_satirinda_konusmaci_ve_kayitta_etiket(tmp_path):
+    rec = SessionRecorder(tmp_path, name="k")
+    who = iter(["speaker_00", "speaker_01"])
+    s = LiveSession(Segmenter(EnergyDetector()), lambda a, f, p: "merhaba", rec, speaker_of=lambda a: next(who))
+    job = FinalJob(audio=tone(1.5), start=0.0, end=1.5)
+    assert s.run_final(job)["speaker"] == "speaker_00" and s.run_final(job)["speaker"] == "speaker_01"
+    s.close()
+    assert s.items[1] == {"id": 1, "start": 0.0, "end": 1.5, "text": "merhaba", "speaker": "speaker_01"}
+    assert "Konuşmacı 2: merhaba" in (tmp_path / "k.txt").read_text(encoding="utf-8")
+
+
+def test_imza_hatasi_metni_engellemez():
+    def boom(a):
+        raise RuntimeError("model yok")
+
+    s = LiveSession(Segmenter(EnergyDetector()), lambda a, f, p: "selam", speaker_of=boom)
+    m = s.run_final(FinalJob(audio=tone(1.5), start=0.0, end=1.5))
+    assert m["text"] == "selam" and m["speaker"] is None
+
+
+def test_canli_konusmaci_etiketi_uctan_uca(tmp_path, monkeypatch):
+    from live_stream.application.live import SpeakerTracker
+
+    monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
+    # sahte imza: sesin perdesine göre (220 Hz ve 440 Hz iki "kişi")
+    def embed(a):
+        f = np.abs(np.fft.rfft(a[:16000]))
+        return unit(f[200:240].sum(), f[420:460].sum(), 1e-3)
+
+    app, store, _ = make_local(tmp_path, monkeypatch, trackers=lambda: SpeakerTracker(embed))
+    audio = np.concatenate([tone(1.5, 220), silence(1.0), tone(1.5, 440), silence(1.0),
+                            tone(1.5, 220), silence(1.0)])
+    with TestClient(app) as client:
+        assert client.get("/live/health").json()["speakers"] is True
+        _, msgs, _ = session(client, "/ws/live?partial_sec=0", audio)
+        _, msgs_off, _ = session(client, "/ws/live?partial_sec=0&speakers=0", audio[:SR * 3])
+    assert [m["speaker"] for m in msgs if m["type"] == "final"] == ["speaker_00", "speaker_01", "speaker_00"]
+    assert all("speaker" not in m for m in msgs_off if m["type"] == "final")
+    row = outbox(store, "live.ended")[0]
+    assert [ln["speaker"] for ln in row["payload"]["lines"]] == ["speaker_00", "speaker_01", "speaker_00"]

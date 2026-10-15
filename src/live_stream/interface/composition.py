@@ -28,17 +28,20 @@ def default_config(models_dir: str | Path = "models", languages=("tr", "vi"),
                    diarizer: str = "cluster", workers: int = 1, profile: str = "full",
                    min_diarize_sec: float = 10.0, sandwich_max: float = 0.0,
                    device: str = "cpu", compute_type: str = "auto",
-                   vi_hotwords: str | None = None) -> PipelineConfig:
+                   vi_hotwords: str | None = None, whisper_threads: int | None = None,
+                   whisper_workers: int | None = None) -> PipelineConfig:
     """workers: aynı süreçte aynı anda işlenecek ses sayısı (yerel mod); motorlar buna göre
     paralel çağrıya hazırlanır. device/compute_type: faster-whisper için (auto: GPU varsa GPU).
     hotwords: Türkçe (Whisper'a boşlukla ayrılmış terimler); vi_hotwords: Vietnamca terim dosyası
-    (Zipformer, BÜYÜK HARF, satır başına bir terim)."""
+    (Zipformer, BÜYÜK HARF, satır başına bir terim). whisper_threads/whisper_workers: faster-whisper'a
+    ayrı bütçe (bir çözüm kaç iş parçacığı, aynı anda kaç çözüm); verilmezse threads ve workers."""
     d, models = Path(models_dir), models or {}
     profiles = {}
     for code in languages:
         extra = {"num_threads": threads,
-                 "whisper": WhisperParams(num_workers=max(1, workers), hotwords=hotwords,
-                                          device=device, compute_type=compute_type)}
+                 "whisper": WhisperParams(num_workers=max(1, whisper_workers or workers), hotwords=hotwords,
+                                          device=device, compute_type=compute_type,
+                                          cpu_threads=whisper_threads)}
         if code == "vi" and vi_hotwords:
             extra["hotwords_file"] = vi_hotwords
         profiles[code] = language_profile(code, d, models.get(code), **extra)
@@ -159,7 +162,8 @@ def config_from_settings(s, workers: int = 1) -> PipelineConfig:
                           s.hotwords, s.diarizer, workers=workers, profile=s.pipeline_profile,
                           vi_hotwords=s.vi_hotwords,
                           min_diarize_sec=s.pipeline_min_diarize_sec, sandwich_max=s.fusion_sandwich_max,
-                          device=s.whisper_device, compute_type=s.whisper_compute_type)
+                          device=s.whisper_device, compute_type=s.whisper_compute_type,
+                          whisper_threads=s.whisper_threads, whisper_workers=s.whisper_workers(workers))
 
 
 def verify_models_or_exit(settings) -> None:
@@ -235,3 +239,16 @@ def build_live(settings, cfg: PipelineConfig, engines: LazyAsrEngines, resolver:
         return resolver.resolve(None, [VadSegment(0.0, audio)])
 
     return live, detector, detect
+
+
+def build_live_speakers(settings, cfg: PipelineConfig):
+    """Oturum başına konuşmacı izleyici üreticisi (imza modeli toplu işinkiyle aynı, bir kez yüklenir).
+    Kapalıysa ya da model yoksa None."""
+    from live_stream.application.live import SpeakerTracker
+    from live_stream.infrastructure.live_speaker import SpeakerEmbedder
+
+    model = cfg.diarizer.embedding_model
+    if not settings.live_speakers or not Path(model).exists():
+        return None
+    embedder = SpeakerEmbedder(model, num_threads=1)
+    return lambda: SpeakerTracker(embedder.embed, threshold=settings.live_speaker_threshold)

@@ -33,7 +33,7 @@ from live_stream.infrastructure.thread_queue import ThreadJobQueue
 from live_stream.infrastructure.webhook import OutboxDispatcher
 from live_stream.interface.api import create_app
 from live_stream.interface.composition import (
-    build_live, build_maintenance, build_pipeline, build_resolver, config_from_settings,
+    build_live, build_live_speakers, build_maintenance, build_pipeline, build_resolver, config_from_settings,
     store_from_settings, verify_models_or_exit,
 )
 from live_stream.interface.live_server import add_live_routes
@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 
 
 def build_local(settings: Settings, workers: int | None = None, warm_up: bool = True,
-                live_engines=None, live_detector=None, live_detect=None):
+                live_engines=None, live_detector=None, live_detect=None, live_speakers=None):
     """Yerel sistemi kurar; (app, store, queue, dispatcher) döndürür (testler de kullanır).
     live_engines/live_detector/live_detect: testler için sahte canlı motorlar (dil -> motor),
     konuşma algılayıcı ve dil tespiti."""
@@ -99,8 +99,9 @@ def build_local(settings: Settings, workers: int | None = None, warm_up: bool = 
     def notify_ended(url: str, payload: dict, job_id: str | None) -> None:
         store.add_event("live.ended", url, payload, job_id)
 
+    speakers = live_speakers if live_speakers is not None else build_live_speakers(settings, cfg)
     add_live_routes(app, settings, engines, live_detector or detector, submit_recording, detect_lang,
-                    notify_ended)
+                    notify_ended, speaker_factory=speakers or None)
     if warm_up:  # canlı modeller açılışta arka planda hazırlanır (ilk konuşmada beklenmesin)
         for e in engines.values():
             e.start_loading()
@@ -138,6 +139,9 @@ def main(argv=None):
     log.info("hazır: http://%s:%d  (diller: %s, eşzamanlı iş: %d — %s)", a.host, a.port,
              ",".join(s.languages), n, why)
     log.info("canlı altyazı: http://%s:%d/canli", a.host, a.port)
+    if "tr" in s.languages and s.model_for("tr").startswith("faster-whisper"):
+        log.info("Türkçe: Whisper çözümü %d iş parçacığı, aynı anda %d (WHISPER_THREADS)",
+                 s.whisper_threads, s.whisper_workers(n))
     try:
         uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
     finally:

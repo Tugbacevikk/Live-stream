@@ -150,7 +150,10 @@ class LiveSession:
     """Tek bir canlı bağlantının durumu: ses -> parçalar -> metin (+ kayıt)."""
 
     def __init__(self, segmenter: Segmenter, transcribe: TranscribeText,
-                 recorder: LiveRecorder | None = None, context_sentences: int = 3):
+                 recorder: LiveRecorder | None = None, context_sentences: int = 3,
+                 speaker_of: Callable[[np.ndarray], "str | None"] | None = None):
+        """speaker_of(cümle sesi) -> konuşmacı etiketi (SpeakerTracker.assign); yoksa etiket yok."""
+        self.speaker_of = speaker_of
         self.segmenter = segmenter
         self.transcribe = transcribe
         self.recorder = recorder
@@ -183,8 +186,13 @@ class LiveSession:
             return {"type": "discard", "start": job.start}
         self._context.append(text)
         item = {"type": "final", "id": self._next_id, "start": job.start, "end": job.end, "text": text}
+        if self.speaker_of is not None:
+            try:
+                item["speaker"] = self.speaker_of(job.audio)
+            except Exception:  # imza çıkarılamadı: metin yine gösterilir
+                item["speaker"] = None
         self._next_id += 1
-        self.items.append({k: item[k] for k in ("id", "start", "end", "text")})
+        self.items.append({k: v for k, v in item.items() if k != "type"})
         if self.recorder:
             self.recorder.write_final(item)
         return item
@@ -258,3 +266,48 @@ def ended_payload(session_id: str, lock: LanguageLock, items: list[dict], *, sta
         "recording": recording,
         "job_id": job_id,
     }
+
+
+class SpeakerTracker:
+    """Canlı oturumda konuşmacı etiketi: her kesin cümlenin ses imzası, o ana kadarki
+    konuşmacıların ortalama imzasıyla karşılaştırılır; yeterince yakınsa o kişi, değilse yeni kişi.
+
+    Toplu iş bütün sesi görüp kümelediği için daha doğrudur; canlı etiket geçicidir, oturum sonu
+    toplu işin sonucu (job.done) esastır.
+    embed(ses) -> birim uzunlukta imza (CAM++). threshold: kosinüs uzaklığı; 15 Ekim, 33 gerçek
+    kayıt: aynı kişinin iki yarısı en fazla 0,37, farklı kişiler medyan 0,72 -> 0,5.
+    Kısa cümlenin (min_sec altı: "evet", "hı hı") imzası güvenilmez: önceki konuşmacıya verilir."""
+
+    def __init__(self, embed: Callable[[np.ndarray], np.ndarray], threshold: float = 0.5,
+                 min_sec: float = 1.0, max_speakers: int = 8):
+        self.embed, self.threshold, self.min_sec, self.max_speakers = embed, threshold, min_sec, max_speakers
+        self._sums: list[np.ndarray] = []   # konuşmacı başına imza toplamı (ortalama yönü)
+        self.last: str | None = None
+
+    @staticmethod
+    def label(i: int) -> str:
+        return f"speaker_{i:02d}"
+
+    @property
+    def count(self) -> int:
+        return len(self._sums)
+
+    def assign(self, audio: np.ndarray) -> str | None:
+        if len(audio) < self.min_sec * SAMPLE_RATE:
+            return self.last
+        e = np.asarray(self.embed(audio), dtype=np.float64)
+        e = e / (np.linalg.norm(e) + 1e-9)
+        if not self._sums:
+            self._sums.append(e.copy())
+            self.last = self.label(0)
+            return self.last
+        cents = np.stack([s / (np.linalg.norm(s) + 1e-9) for s in self._sums])
+        dist = 1.0 - cents @ e
+        best = int(np.argmin(dist))
+        if dist[best] >= self.threshold and len(self._sums) < self.max_speakers:
+            self._sums.append(e.copy())
+            best = len(self._sums) - 1
+        else:
+            self._sums[best] += e
+        self.last = self.label(best)
+        return self.last

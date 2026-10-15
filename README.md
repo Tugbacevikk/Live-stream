@@ -77,6 +77,11 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
   bulunan dil ve güveni ekranın sağ üstünde görünür. Türkçe: Whisper (ara metin beam 1, kesin
   metin beam 5 + önceki cümleler, büyük harf ve noktalamalı). Vietnamca: Zipformer (küçük harf,
   noktalamasız; çok hızlı olduğu için GPU gerekmez).
+- **Konuşmacı etiketi:** soru-cevapta ekranda "Konuşmacı 1 / 2" görünür (yalnızca ikinci kişi
+  konuşunca; tek konuşmacıda ekran sade). Her cümlenin ses imzası (toplu işle aynı CAM++ modeli)
+  o ana kadarki kişilerle karşılaştırılır; 1 sn'den kısa cümle ("evet") önceki kişiye verilir.
+  Geçici bir etikettir, kesin konuşmacı ayrımı oturum sonundaki toplu işte. Kapatmak:
+  Ayarlar > Konuşmacıları ayır ya da `LIVE_SPEAKERS=false`.
 - **Dosyayla test:** bir kaydı gerçek zaman hızında çalar; konferanstan önce evde prova için.
 - **Kayıtlar:** her oturum `recordings/` altına anında yazılır (çökmeye dayanıklı):
   `.wav` (ham ses), `.txt` (`[00:01:23] metin`), `.jsonl`.
@@ -106,6 +111,8 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
 - Cümleler ortadan bölünüyorsa `END_SILENCE_MS`'i artırın (900–1000), metin geç geliyorsa azaltın.
 - Ekrandaki **gecikme** 2 sn'yi aşıyorsa `LIVE_MODEL=faster-whisper-small` (indirmek:
   `python scripts/download_models.py --tr faster-whisper-small`). Toplu iş medium'da kalır.
+- **Provayı ölçün:** `python benchmarks/canli_testi.py prova.wav --metin prova.txt` kaydı canlı
+  hattan geçirip gecikmeyi, hızı ve (doğru metin verilirse) hata oranını raporlar.
 
 ## Ses analizi (toplu iş)
 
@@ -172,6 +179,8 @@ Canlı altyazı bu modda yoktur; o, konuşmacının kendi bilgisayarında yerel 
 | `LIVE_RESUME_SEC` | `30` | Kopan canlı oturumun geri bağlanma için beklediği süre |
 | `RECORDINGS_RETENTION_DAYS` | `30` | Canlı oturum kayıtlarının saklanma süresi (0 = silme) |
 | `NUM_SPEAKERS` | `0` | 0 = sesten bul |
+| `WHISPER_THREADS` | `auto` | Türkçe Whisper'ın bir çözümde kullandığı iş parçacığı (auto = fiziksel çekirdek) |
+| `LIVE_SPEAKERS` / `LIVE_SPEAKER_THRESHOLD` | `true` / `0.5` | Canlı konuşmacı etiketi ve eşiği |
 | `CONCURRENCY` | `auto` | Aynı anda işlenen dosya; çekirdek ve belleğe göre |
 
 | Donanım | Önerilen |
@@ -215,7 +224,7 @@ lint-imports                            # katman kuralları
 python benchmarks/kabul_testi.py a.wav b.wav --es-zamanli 4
 ```
 
-Diğer ölçümler: `benchmarks/diyalog_testi.py` (DER, cpWER), `yerel_dogruluk_testi.py` (WER),
+Canlı mod: `benchmarks/canli_testi.py` (gecikme, hız, WER). Diğer ölçümler: `benchmarks/diyalog_testi.py` (DER, cpWER), `yerel_dogruluk_testi.py` (WER),
 `konusmaci_testi.py`, `turkce_dogruluk_testi.py`, `dil_tespiti_testi.py`, `dogruluk_testi.py`
 (Vietnamca Zipformer). VietMed'den test seti: `scripts/vietmed_hazirla.py`. Sonuçlar: [docs/olcumler.md](docs/olcumler.md).
 
@@ -225,7 +234,8 @@ Diğer ölçümler: `benchmarks/diyalog_testi.py` (DER, cpWER), `yerel_dogruluk_
 - [x] Canlı altyazı çekirdeğe katıldı: aynı model, ONNX Silero (PyTorch'suz), oturum sonu toplu iş
 - [x] Vietnamca: toplu iş (Zipformer + dil tespiti) ve canlı altyazı (dil seçimi, otomatik dil)
 - [x] Konuşma bitince webhook: `live.ended` + konuşmacılı `job.done`, aynı outbox'tan
-- [ ] Canlı ekranda konuşmacı etiketi (cümle başına CAM++ imzası, oturum sonunda kesinleşir)
+- [x] Canlı ekranda konuşmacı etiketi (cümle başına CAM++ imzası, oturum sonunda kesinleşir)
+- [x] Türkçe hız: Whisper'a ayrı iş parçacığı bütçesi, ucuz güvenlik ağı (Vietnamca reposundan)
 - [ ] Türkçe doğru metinli ölçüm: FLEURS tr + kendi sunum provası (WER, DER; canlı ve toplu)
 - [ ] Canlı mod için model karşılaştırması: medium / small / Omnilingual, gecikme × WER
 - [ ] Vietnamca ince ayarın çalıştırılması ve Kapı 2 kararı (`finetune/`)

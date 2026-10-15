@@ -166,7 +166,7 @@ Adres, `callback_url` ile aynı denetimden geçer (production'da iç ağ adresle
 | `reason` | `stop` (Durdur) ya da `disconnect` (bağlantı koptu; kalan cümleler yine de işlendi) |
 | `duration` | Oturumda gelen sesin süresi (sn) |
 | `language.source` | `secim` (kullanıcı seçti) ya da `tespit` (Otomatik; ilk cümleden bulundu) |
-| `lines` | Kesinleşen satırlar; `start`/`end` oturum başından saniye. Türkçede büyük harf ve noktalama vardır, Vietnamcada yoktur |
+| `lines` | Kesinleşen satırlar; `start`/`end` oturum başından saniye. Türkçede büyük harf ve noktalama vardır, Vietnamcada yoktur. Konuşmacı etiketi açıksa her satırda `speaker` (`speaker_00`…; geçici, kesini `job.done`'da) |
 | `job_id` | Konuşmacı ayrımı için açılan toplu iş; `null`: analiz kapalıydı ya da hiç konuşma yoktu (o zaman `job.done` gelmez) |
 
 Canlı metin hızlı üretilir ve konuşmacı bilgisi taşımaz; kalıcı kayıt için `job.done`'daki

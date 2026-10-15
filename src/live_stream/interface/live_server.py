@@ -21,7 +21,8 @@ WebSocket protokolü
                       {"type": "language", "code": "vi", "confidence": 0.97, "model": "...",
                        "device": "cpu"}   ('auto' seçildiyse ilk cümleden sonra bir kez)
                       {"type": "partial", "start": 3.1, "text": "..."}
-                      {"type": "final", "id": 0, "start": 3.1, "end": 5.4, "text": "..."}
+                      {"type": "final", "id": 0, "start": 3.1, "end": 5.4, "text": "...",
+                       "speaker": "speaker_00" (konuşmacı etiketi açıksa; kısa cümlede önceki kişi)}
                       {"type": "discard", "start": 3.1}
                       {"type": "stats", "lag_sec": 0.4}
                       {"type": "error", "message": "..."}
@@ -148,10 +149,12 @@ class _Run:
 def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], detector_factory: Callable,
                     submit_recording: Callable[..., str | None] | None = None,
                     detect_language: Callable | None = None,
-                    notify_ended: Callable[[str, dict, str | None], None] | None = None) -> None:
+                    notify_ended: Callable[[str, dict, str | None], None] | None = None,
+                    speaker_factory: Callable[[], object] | None = None) -> None:
     """engines: dil kodu -> motor. detect_language(ses) -> LanguageDecision ('auto' için).
     submit_recording(ses yolu, dil, callback_url, session_id) -> toplu iş kimliği: oturum sonu
-    konuşmacı ayrımı için. notify_ended(url, gövde, job_id): 'live.ended' bildirimini outbox'a yazar."""
+    konuşmacı ayrımı için. notify_ended(url, gövde, job_id): 'live.ended' bildirimini outbox'a yazar.
+    speaker_factory() -> SpeakerTracker: oturum başına canlı konuşmacı etiketi (yoksa etiket yok)."""
     languages = list(engines)
     default = settings.live_language if settings.live_language in (*languages, "auto") else languages[0]
     infer_lock = asyncio.Lock()  # çıkarımlar sırayla: birden çok canlı bağlantı GPU'yu boğmasın
@@ -176,6 +179,7 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             "auto": len(languages) > 1 and detect_language is not None,
             "webhook": bool(settings.live_webhook_url and notify_ended),
             "auth": bool(settings.api_key),
+            "speakers": speaker_factory is not None,
             "ready": all(e.asr is not None for e in engines.values()),
         }
 
@@ -284,6 +288,7 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
                 partial_interval_sec=float(q.get("partial_sec", settings.partial_interval_sec)),
             )
             save = q.get("save", "1" if settings.save_recordings else "0") == "1"
+            want_speakers = q.get("speakers", "1") == "1"
             analyze = save and q.get("analyze", "1" if settings.live_auto_analyze else "0") == "1"
         except ValueError:
             await reject(ws, "Geçersiz ayar değeri.")
@@ -320,7 +325,10 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
 
         detector = await asyncio.to_thread(detector_factory)
         recorder = SessionRecorder(settings.recordings_dir) if save else None
-        r = _Run(session=LiveSession(Segmenter(detector, seg_cfg), transcribe, recorder), lock=lock,
+        tracker = speaker_factory() if speaker_factory and want_speakers else None
+        session = LiveSession(Segmenter(detector, seg_cfg), transcribe, recorder,
+                              speaker_of=tracker.assign if tracker else None)
+        r = _Run(session=session, lock=lock,
                  recorder=recorder, callback=callback, analyze=analyze, lang=lang)
         r.worker = asyncio.create_task(final_worker(r))
         runs[r.id] = r

@@ -96,3 +96,34 @@ def test_katalog_ve_profil():
     p = language_profile("tr", "models")
     assert p.segmentation == "vad" and p.asr_model.kind == "faster-whisper"
     assert p.asr_model.path("model").replace("\\", "/").endswith("faster-whisper-medium/model.bin")
+
+
+class RescueBatched:
+    """Toplu çözümde yalnızca 1-3 sn aralığına kelime döner; diğer aralıklar boş kalır."""
+
+    def __init__(self):
+        self.calls = []
+
+    def transcribe(self, audio, clip_timestamps, batch_size, **opt):
+        self.calls.append((clip_timestamps, opt))
+        return iter([NS(text=" tamam", words=[w(" tamam", 1.2, 1.6)])]), None
+
+
+def test_guvenlik_agi_tek_toplu_cozum_ve_sinirli_tekrar():
+    b, m = RescueBatched(), FakeModel()
+    segs = [seg(1.0, 3.0)] + [seg(10.0 + 5 * i, 12.0 + 5 * i + 0.1 * i) for i in range(6)]
+    words = engine(b, m).rescue(segs)
+    assert len(b.calls) == 1 and len(b.calls[0][0]) == 7         # tüm aralıklar tek çağrıda
+    opt = b.calls[0][1]
+    assert opt["temperature"] == 0.0 and opt["no_speech_threshold"] == 0.8
+    # boş kalan 6 aralığın en uzun 4'ü tek tek, düşük maliyetle yeniden denenir
+    assert len(m.calls) == FasterWhisperAsr.RESCUE_MAX_RETRY == 4
+    assert sorted(m.calls, reverse=True) == m.calls
+    assert words[0].text == "tamam" and [x.text for x in words[1:3]] == ["iyi", "günler"]
+
+
+def test_guvenlik_agi_tekrar_ayarlari():
+    e = engine(None)
+    o = e._options(rescue=True, retry=True)
+    assert o["temperature"] == (0.2, 0.4) and o["best_of"] == 1 and o["beam_size"] == 1
+    assert engine(None)._options(rescue=True)["beam_size"] == 5

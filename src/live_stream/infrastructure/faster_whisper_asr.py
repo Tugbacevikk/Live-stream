@@ -135,18 +135,41 @@ class FasterWhisperAsr:
                 raise FileNotFoundError(
                     f"{model.folder}/model.bin yok: python scripts/download_models.py --tr {model.name}")
             whisper_model, self.device, _ = load_whisper(
-                str(model.folder), self.wp.device, self.wp.compute_type, params.num_threads,
-                self.wp.num_workers)
+                str(model.folder), self.wp.device, self.wp.compute_type,
+                self.wp.cpu_threads or params.num_threads, self.wp.num_workers)
             batched = BatchedInferencePipeline(model=whisper_model)
         self.model = whisper_model
         self.batched = batched
 
+    # sıcaklık denemesine kalan en fazla parça (en uzunlar): her deneme ayrı 30 sn'lik çözüm
+    RESCUE_MAX_RETRY = 4
+
     def rescue(self, segments: list[VadSegment]) -> list[Word]:
-        """Güvenlik ağı: ilk geçişte hiç kelime çıkmayan konuşma aralıkları, tek tek ve
-        sıcaklık geri çekilmesiyle (0,0 -> 0,6) yeniden çözülür. Projede geri çekilme her
-        parçada açıktı (yavaş: bir parça 4 kez çözülebilir); burada yalnızca kaçan aralıklarda."""
-        raw = self._one_by_one(segments, rescue=True)
-        words = []
+        """Güvenlik ağı: ilk geçişte kelime çıkmayan konuşma aralıklarını yeniden çözer.
+
+        Önceki sürüm (ve fine-tuning projesindeki) her aralığı tek tek, 4 sıcaklıkla ve sıcaklık
+        başına 5 örnekle (best_of) çözüyordu. Whisper her çağrıda 30 sn'lik pencere işlediği için
+        2 sn'lik boşluk da 30 sn'lik ses kadar sürüyordu (15 Ekim, 2 dk ses 296 sn). Şimdi:
+          1. tüm aralıklar TEK toplu çözümde, sıcaklık 0, gevşek eşiklerle;
+          2. hâlâ boş kalanların en uzun RESCUE_MAX_RETRY tanesi tek tek, sıcaklık 0,2 ve 0,4,
+             tek örnek (best_of=1), beam 1.
+        (Vietnamese-speech-to-text-models 860a0ea'dan.)"""
+        if not segments:
+            return []
+        raw, todo = [], list(segments)
+        if self.batched is not None:
+            try:
+                raw = self._batched(segments, opts=self._options(rescue=True))
+                todo = [s for s in segments if not _has_word(raw, s)]
+            except Exception as e:
+                log.warning("güvenlik ağı toplu çözümü başarısız (%s), tek tek", e)
+                raw, todo = [], list(segments)
+        todo = sorted(todo, key=lambda s: len(s.samples), reverse=True)[:self.RESCUE_MAX_RETRY]
+        raw += self._one_by_one(todo, rescue=True, retry=True)
+        return drop_repeats(self._words(raw), self.wp.max_repeat)
+
+    def _words(self, raw) -> list[Word]:
+        words: list[Word] = []
         for seg_text, seg_words in raw:
             if _key(seg_text) in self._drop:
                 continue
@@ -156,14 +179,16 @@ class FasterWhisperAsr:
                     p = getattr(w, "probability", None)
                     words.append(Word(text=text, start=float(w.start), end=float(max(w.start, w.end)),
                                       conf=round(float(p), 3) if p is not None else None))
-        return drop_repeats(words, self.wp.max_repeat)
+        return words
 
-    def _options(self, fast: bool = False, rescue: bool = False) -> dict:
+    def _options(self, fast: bool = False, rescue: bool = False, retry: bool = False) -> dict:
         wp = self.wp
         if rescue:
-            return dict(language=self.language, task="transcribe", beam_size=wp.beam_size,
+            return dict(language=self.language, task="transcribe",
+                        beam_size=1 if retry else wp.beam_size, best_of=1,
                         word_timestamps=True, condition_on_previous_text=False,
-                        temperature=(0.0, 0.2, 0.4, 0.6), repetition_penalty=wp.repetition_penalty,
+                        temperature=(0.2, 0.4) if retry else 0.0,
+                        repetition_penalty=wp.repetition_penalty,
                         no_repeat_ngram_size=wp.no_repeat_ngram_size, no_speech_threshold=0.8,
                         compression_ratio_threshold=wp.compression_ratio_threshold,
                         log_prob_threshold=-1.0, initial_prompt=wp.initial_prompt, hotwords=wp.hotwords)
@@ -187,17 +212,7 @@ class FasterWhisperAsr:
                 log.warning("toplu çözme başarısız (%s), parçalar tek tek çözülüyor", e)
         if raw is None:
             raw = self._one_by_one(segments, fast)
-        words: list[Word] = []
-        for seg_text, seg_words in raw:
-            if _key(seg_text) in self._drop:
-                continue
-            for w in seg_words:
-                text = self.normalizer.normalize(w.word)
-                if text:
-                    p = getattr(w, "probability", None)
-                    words.append(Word(text=text, start=float(w.start), end=float(max(w.start, w.end)),
-                                      conf=round(float(p), 3) if p is not None else None))
-        return drop_repeats(words, self.wp.max_repeat)
+        return drop_repeats(self._words(raw), self.wp.max_repeat)
 
     def transcribe_text(self, samples: np.ndarray, fast: bool = False, prompt: str | None = None,
                         normalizer: TextNormalizer | None = None) -> str:
@@ -231,7 +246,7 @@ class FasterWhisperAsr:
         words = [Word(text=w, start=0.0, end=0.0) for w in " ".join(parts).split()]
         return " ".join(w.text for w in drop_repeats(words, wp.max_repeat))
 
-    def _batched(self, segments: list[VadSegment], fast: bool = False):
+    def _batched(self, segments: list[VadSegment], fast: bool = False, opts: dict | None = None):
         """Parçalar asıl zamanlarıyla tek bir diziye yerleştirilir; clip_timestamps ile
         yalnızca onlar çözülür ve kelime zamanları doğrudan mutlak gelir."""
         end = max(s.end for s in segments)
@@ -243,16 +258,24 @@ class FasterWhisperAsr:
             audio[i:i + n] = s.samples[:n]
             clips.append({"start": i / SR, "end": (i + n) / SR})
         result, _ = self.batched.transcribe(audio, clip_timestamps=clips,
-                                            batch_size=self.wp.batch_size, **self._options(fast))
+                                            batch_size=self.wp.batch_size, **(opts or self._options(fast)))
         return [(r.text, list(r.words or [])) for r in result]  # list(): hatalar burada çıksın
 
-    def _one_by_one(self, segments: list[VadSegment], fast: bool = False, rescue: bool = False):
+    def _one_by_one(self, segments: list[VadSegment], fast: bool = False, rescue: bool = False,
+                    retry: bool = False):
         out = []
         for s in segments:
-            result, _ = self.model.transcribe(s.samples, vad_filter=False, **self._options(fast, rescue))
+            result, _ = self.model.transcribe(s.samples, vad_filter=False,
+                                              **self._options(fast, rescue, retry))
             for r in result:
                 out.append((r.text, [_Shifted(w, s.start) for w in (r.words or [])]))
         return out
+
+
+def _has_word(raw, seg: VadSegment) -> bool:
+    """Toplu çözümde bu aralığa düşen kelime var mı (kelime zamanları mutlak)."""
+    a, b = seg.start, seg.start + len(seg.samples) / SR
+    return any(a <= float(w.start) < b for _, ws in raw for w in ws)
 
 
 class _Shifted:

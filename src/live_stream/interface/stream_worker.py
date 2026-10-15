@@ -85,7 +85,8 @@ def main(argv=None):
         n, why = 1, "dil tespiti kısa sürer"
     else:
         n, why = s.concurrency_plan(a.kuyruk)
-    log.info("kuyruk=%s süreç=%d ONNX_THREADS=%d (%s)", a.kuyruk, n, s.threads, why)
+    log.info("kuyruk=%s süreç=%d ONNX_THREADS=%d WHISPER_THREADS=%d (%s)", a.kuyruk, n, s.threads,
+             s.whisper_threads, why)
     if n == 1:
         _run(a.kuyruk)
         return

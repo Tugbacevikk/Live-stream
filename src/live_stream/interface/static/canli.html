@@ -51,6 +51,13 @@
   body.present header, body.present details.settings { display: none; }
   body.present #stage { padding-top: 10vh; padding-bottom: 12vh; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
   body.present .line .t { display: none; }
+  /* konuşmacı etiketi: yalnızca ikinci kişi konuşunca görünür (tek konuşmacıda ekran sade) */
+  .line .who { display: none; font-weight: 650; margin-right: .35em; }
+  body.multi .line .who { display: inline; }
+  .who.s0 { color: #7fb0ff; } .who.s1 { color: #f2b35c; } .who.s2 { color: #6fd39b; } .who.s3 { color: #e58fd0; }
+  .who.s4 { color: #9fd7e8; } .who.s5 { color: #e8a08f; } .who.s6 { color: #c3b4f5; } .who.s7 { color: #d6d48a; }
+  :root:not(.dark) .who.s0 { color: #1f5fd1; } :root:not(.dark) .who.s1 { color: #b06a00; }
+  :root:not(.dark) .who.s2 { color: #1d8a4e; } :root:not(.dark) .who.s3 { color: #a8338d; }
   body.present .line:not(:nth-last-of-type(-n+3)) { display: none; }
   .exit-hint { position: fixed; top: 10px; right: 14px; color: var(--muted); font-size: 12px; opacity: 0; transition: opacity .3s; pointer-events: none; }
   body.present .exit-hint { opacity: .6; }
@@ -96,6 +103,7 @@
     <label class="check"><input id="save" type="checkbox" checked> Sesi ve metni diske kaydet</label>
     <label class="check"><input id="analyze" type="checkbox" checked> Bitince konuşmacı ayrımlı transkript hazırla</label>
     <label class="check"><input id="ns" type="checkbox" checked> Tarayıcı gürültü bastırma</label>
+    <label class="check" id="spkRow" hidden><input id="spk" type="checkbox" checked> Konuşmacıları ayır (soru-cevap)</label>
     <label id="keyRow" hidden>API anahtarı<input id="apiKey" type="password" autocomplete="off" placeholder="sunucu istiyor"></label>
   </div>
 </details>
@@ -110,6 +118,8 @@ let ws = null, ctx = null, node = null, src = null, mic = null, wakeLock = null;
 let running = false, source = null, retryTimer = null, offset = 0, sent = 0;
 // kopunca aynı oturuma dönmek için: sunucunun verdiği kimlik ve belirteç, alınan son satır
 let sessionId = null, resumeToken = null, lastId = -1, gotReady = false, fatal = false;
+const speakersSeen = new Set();
+const spkNo = (s) => Number(String(s).split("_").pop()) + 1;  // speaker_00 -> 1
 // bağlantı yokken çekilen ses (100 ms'lik paketler); bağlantı gelince gönderilir, en fazla 60 sn
 const pending = [], PENDING_MAX = 600;
 const transcript = [];
@@ -188,7 +198,8 @@ function connect() {
     language: $("langSel").value,
     silence_ms: $("silence_ms").value, partial_sec: $("partial_sec").value,
     max_sec: $("max_sec").value, save: $("save").checked ? "1" : "0",
-    analyze: $("save").checked && $("analyze").checked ? "1" : "0" });
+    analyze: $("save").checked && $("analyze").checked ? "1" : "0",
+    speakers: $("spk").checked ? "1" : "0" });
   const key = $("apiKey").value.trim();
   if (key) p.set("key", key);
   if (sessionId) { p.set("resume", sessionId); p.set("token", resumeToken); p.set("after", lastId); }
@@ -261,10 +272,18 @@ function addLine(m) {
   lastId = m.id;
   $("empty")?.remove();
   const start = m.start + offset;
-  transcript.push({ start, text: m.text });
+  transcript.push({ start, text: m.text, speaker: m.speaker || null });
   const p = document.createElement("p");
   p.className = "line";
   p.innerHTML = `<span class="t">${fmt(start)}</span>`;
+  if (m.speaker) {
+    speakersSeen.add(m.speaker);
+    if (speakersSeen.size > 1) document.body.classList.add("multi");
+    const w = document.createElement("span");
+    w.className = `who s${(spkNo(m.speaker) - 1) % 8}`;
+    w.textContent = `Konuşmacı ${spkNo(m.speaker)}:`;
+    p.append(w);
+  }
   p.append(document.createTextNode(m.text));
   stage.insertBefore(p, partialEl);
   partialEl.textContent = "";
@@ -295,6 +314,7 @@ async function start(kind) {
   if (running) return;
   running = true; source = kind; offset = 0; sent = 0; $("jobLink").hidden = true;
   sessionId = null; resumeToken = null; lastId = -1; pending.length = 0;
+  speakersSeen.clear(); document.body.classList.remove("multi");
   $("startBtn").disabled = true; $("fileIn").disabled = true; $("stopBtn").disabled = false; $("micSel").disabled = true; $("langSel").disabled = true;
   setStatus("Model hazırlanıyor…");
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
@@ -329,6 +349,7 @@ async function listLangs() {
   try {
     const h = await (await fetch("/live/health")).json();
     $("keyRow").hidden = !h.auth;
+    $("spkRow").hidden = !h.speakers;
     const opts = h.languages.map((l) => `<option value="${l.code}">${l.name}</option>`);
     if (h.auto) opts.push('<option value="auto">Otomatik (ilk cümleden)</option>');
     $("langSel").innerHTML = opts.join("");
@@ -364,7 +385,8 @@ document.addEventListener("fullscreenchange", () => { if (!document.fullscreenEl
 
 function download() {
   if (!transcript.length) return;
-  const text = transcript.map((l) => `[${fmt(l.start)}] ${l.text}`).join("\n");
+  const multi = speakersSeen.size > 1;
+  const text = transcript.map((l) => `[${fmt(l.start)}] ${multi && l.speaker ? `Konuşmacı ${spkNo(l.speaker)}: ` : ""}${l.text}`).join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
   a.download = `altyazi_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.txt`;

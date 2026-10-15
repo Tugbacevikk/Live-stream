@@ -364,3 +364,71 @@ def test_canli_vietnamca_ve_otomatik_dil(tmp_path, monkeypatch, secim):
         assert len({u.speaker for u in t.utterances}) == 2  # 0.wav ve 1.wav iki farklı kişi
     finally:
         queue.shutdown(wait=False)
+
+
+@VI_OK
+@need(*DIAR)
+def test_canli_oturum_sonu_webhooklari_gercek_alici(tmp_path, monkeypatch):
+    """Konuşma bitince: önce 'live.ended' (canlı metin), konuşmacı ayrımı bitince 'job.done';
+    ikisi de outbox'tan, imzalı, gerçek bir HTTP alıcısına."""
+    import json
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from fastapi.testclient import TestClient
+
+    from live_stream.domain import JobStatus
+    from live_stream.infrastructure.webhook import verify_signature
+    from live_stream.interface.local_server import build_local
+    from live_stream.interface.settings import Settings
+
+    got = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            got.append((dict(self.headers), body))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    hook = f"http://127.0.0.1:{srv.server_port}/hook"
+    monkeypatch.setenv("CONCURRENCY", "1")
+    s = Settings(models_dir=str(M), data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"),
+                 languages=["vi"], verify_models=False, live_webhook_url=hook, webhook_secret="gizli")
+    app, store, queue, dispatcher = build_local(s, workers=1)
+    w = vi_wavs()
+    sil = np.zeros(16000, dtype=np.float32)
+    pcm = (np.concatenate([sil, w[0], sil, w[1], sil]) * 32767).astype("<i2").tobytes()
+    try:
+        with TestClient(app) as c, c.websocket_connect("/ws/live?partial_sec=0") as ws:
+            ws.receive_json()
+            for i in range(0, len(pcm), 3200):
+                ws.send_bytes(pcm[i:i + 3200])
+            ws.send_text('{"type": "stop"}')
+            while (m := ws.receive_json())["type"] != "done":
+                pass
+        assert m["webhook"] is True and m["job_id"]
+        for _ in range(600):
+            dispatcher.run_once()
+            if store.get(m["job_id"]).status == JobStatus.DONE and len(got) >= 2:
+                break
+            time.sleep(0.1)
+        dispatcher.run_once()
+    finally:
+        queue.shutdown(wait=False)
+        srv.shutdown()
+
+    events = [h["X-Event"] for h, _ in got]
+    assert events == ["live.ended", "job.done"]
+    for h, body in got:
+        assert verify_signature("gizli", h["X-Timestamp"], body, h["X-Signature"])
+    ended, done = (json.loads(b) for _, b in got)
+    assert ended["session_id"] == m["session_id"] and len(ended["lines"]) == 2
+    assert ended["job_id"] == done["job_id"] == m["job_id"] and got[0][0]["X-Session-Id"] == m["session_id"]
+    assert done["status"] == "done" and len({u["speaker"] for u in done["utterances"]}) == 2

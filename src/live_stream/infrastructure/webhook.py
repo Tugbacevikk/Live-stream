@@ -4,8 +4,9 @@
 - Diğer her şey (hata kodu, zaman aşımı, bağlantı yok): artan aralıkla tekrar
   (10 sn, 20 sn, 40 sn ... en fazla 1 saat), max_attempts denemeden sonra bırakılır;
   satır outbox'ta last_error ile kalır, elle incelenebilir.
-- Gövde: iş sonucu JSON'u. Başlıklar: X-Event (job.done / job.failed / job.rejected),
-  X-Job-Id, X-Delivery-Id (aynı bildirim tekrar gelirse alıcı bununla ayıklar).
+- Gövde: iş sonucu JSON'u. Başlıklar: X-Event (job.done / job.failed / job.rejected /
+  live.ended), X-Job-Id (işe bağlı değilse boş), X-Session-Id (canlı oturum bildirimlerinde),
+  X-Delivery-Id (aynı bildirim tekrar gelirse alıcı bununla ayıklar).
 - İmza (WEBHOOK_SECRET tanımlıysa): X-Timestamp ve
   X-Signature: sha256=HMAC_SHA256(secret, f"{timestamp}.{gövde}")
   Alıcı aynı hesabı yapıp karşılaştırır; ayrıca zaman damgası çok eskiyse
@@ -46,12 +47,14 @@ def backoff(attempts: int, base: float = 10.0, cap: float = 3600.0) -> timedelta
 USER_AGENT = "live-stream-webhook/1"
 
 
-def build_request(payload: dict, event: str, job_id: str, delivery_id: str,
+def build_request(payload: dict, event: str, job_id: str | None, delivery_id: str,
                   secret: str = "") -> tuple[bytes, dict[str, str]]:
     """Gövde ve başlıklar (gerçek teslim ve test bildirimi aynı biçimde)."""
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     headers = {"Content-Type": "application/json; charset=utf-8", "User-Agent": USER_AGENT,
-               "X-Event": event, "X-Job-Id": job_id, "X-Delivery-Id": delivery_id}
+               "X-Event": event, "X-Job-Id": job_id or "", "X-Delivery-Id": delivery_id}
+    if payload.get("session_id"):
+        headers["X-Session-Id"] = str(payload["session_id"])
     if secret:
         ts = str(int(time.time()))
         headers["X-Timestamp"] = ts
@@ -108,10 +111,11 @@ class OutboxDispatcher:
             if row["attempts"] + 1 >= self.max_attempts:
                 log.error("webhook teslim edilemedi (ölü) job=%s teslim=%s %s; "
                           "POST /webhooks/%s/retry ile yeniden denenebilir",
-                          row["job_id"], row["id"], err, row["id"])
+                          row["job_id"] or row["payload"].get("session_id"), row["id"], err, row["id"])
             else:
                 log.warning("webhook başarısız job=%s deneme=%d %s; %ss sonra tekrar",
-                            row["job_id"], row["attempts"] + 1, err, int(wait.total_seconds()))
+                            row["job_id"] or row["payload"].get("session_id"), row["attempts"] + 1, err,
+                            int(wait.total_seconds()))
         return sent
 
     def stop(self) -> None:

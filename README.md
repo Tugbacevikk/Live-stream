@@ -83,6 +83,11 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
 - **Konuşmacılı transkript:** oturum bitince ekranda "Konuşmacılı transkript ↗" bağlantısı çıkar;
   soru-cevap bölümü dahil kimin ne söylediği ana sayfada açılır, satır satır düzeltilebilir.
   Kapatmak: ayarlarda kutucuk ya da `LIVE_AUTO_ANALYZE=false`.
+- **Oturum sonu bildirimi (webhook):** `LIVE_WEBHOOK_URL` tanımlıysa konuşma bitince
+  (Durdur ya da bağlantı kopması) o adrese önce `live.ended` (canlı metin, dil, süre), konuşmacı
+  ayrımı bitince `job.done` (kimin ne söylediği) gider; imzalı ve tekrar denemeli.
+  Oturum başına da verilebilir: `/ws/live?callback_url=...`. Ayrıntı:
+  [docs/entegrasyon.md](docs/entegrasyon.md#41-canlı-oturum-bitti-liveended).
 - **Bağlantı koparsa** ses kesilmeden yeniden bağlanır; ekran uykusu engellenir.
 
 **Konferans ipuçları**
@@ -154,6 +159,8 @@ Canlı altyazı bu modda yoktur; o, konuşmacının kendi bilgisayarında yerel 
 | `END_SILENCE_MS` | `700` | Cümle bitti demek için duraklama |
 | `PARTIAL_INTERVAL_SEC` | `1.2` | Ara metin sıklığı; yavaş bilgisayarda artırın ya da `0` |
 | `LIVE_AUTO_ANALYZE` | `true` | Oturum bitince konuşmacı ayrımlı transkript |
+| `LIVE_WEBHOOK_URL` | — | Oturum bitince bildirim adresi (`live.ended`, sonra `job.done`) |
+| `WEBHOOK_SECRET` | — | Bildirim imzası (HMAC-SHA256) |
 | `NUM_SPEAKERS` | `0` | 0 = sesten bul |
 | `CONCURRENCY` | `auto` | Aynı anda işlenen dosya; çekirdek ve belleğe göre |
 
@@ -207,6 +214,7 @@ Diğer ölçümler: `benchmarks/diyalog_testi.py` (DER, cpWER), `yerel_dogruluk_
 - [x] Toplu iş çekirdeği (Vietnamese-speech-to-text-models'ten)
 - [x] Canlı altyazı çekirdeğe katıldı: aynı model, ONNX Silero (PyTorch'suz), oturum sonu toplu iş
 - [x] Vietnamca: toplu iş (Zipformer + dil tespiti) ve canlı altyazı (dil seçimi, otomatik dil)
+- [x] Konuşma bitince webhook: `live.ended` + konuşmacılı `job.done`, aynı outbox'tan
 - [ ] Canlı ekranda konuşmacı etiketi (cümle başına CAM++ imzası, oturum sonunda kesinleşir)
 - [ ] Türkçe doğru metinli ölçüm: FLEURS tr + kendi sunum provası (WER, DER; canlı ve toplu)
 - [ ] Canlı mod için model karşılaştırması: medium / small / Omnilingual, gecikme × WER

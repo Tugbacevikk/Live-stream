@@ -87,11 +87,19 @@ def build_local(settings: Settings, workers: int | None = None, warm_up: bool = 
         engines, detect_lang = live_engines, live_detect
     submit = SubmitJob(store, queue, settings.languages)
 
-    def submit_recording(path: str, language: str | None) -> str:
-        """language: oturumun dili ('auto' oturumda bulunduysa o; yoksa toplu iş kendi bulur)."""
-        return submit(AudioJob(uuid.uuid4().hex, path, language))
+    def submit_recording(path: str, language: str | None, callback_url: str | None = None,
+                         session_id: str | None = None) -> str:
+        """language: oturumun dili ('auto' oturumda bulunduysa o; yoksa toplu iş kendi bulur).
+        callback_url: oturum sonu bildiriminin adresi; konuşmacı ayrımı bitince 'job.done' oraya.
+        external_id = live:<oturum>: alıcı iki bildirimi oturum kimliğiyle de eşleyebilir."""
+        return submit(AudioJob(uuid.uuid4().hex, path, language, callback_url,
+                               external_id=f"live:{session_id}" if session_id else None))
 
-    add_live_routes(app, settings, engines, live_detector or detector, submit_recording, detect_lang)
+    def notify_ended(url: str, payload: dict, job_id: str | None) -> None:
+        store.add_event("live.ended", url, payload, job_id)
+
+    add_live_routes(app, settings, engines, live_detector or detector, submit_recording, detect_lang,
+                    notify_ended)
     if warm_up:  # canlı modeller açılışta arka planda hazırlanır (ilk konuşmada beklenmesin)
         for e in engines.values():
             e.start_loading()

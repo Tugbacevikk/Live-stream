@@ -100,3 +100,54 @@ def test_tek_dilde_dili_belirsiz_is_o_dile_konur():
     m = Maintenance(store, lambda p: False, 0, 0, 600, now=lambda: now, queue=Q(),
                     queue_idle=lambda q: True, queued_stale_sec=300, default_language="tr")
     assert m.run_once()["yeniden_kuyrukta"] == 1 and sent == [("dilsiz", "tr")]
+
+
+def test_ise_bagli_olmayan_bildirim_imzali_gider_ve_alici_dogrular():
+    """Gerçek HTTP alıcısı: 'live.ended' outbox'tan imzalı gider, alıcı imzayı doğrular."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from live_stream.infrastructure.db import SqlAlchemyJobStore
+    from live_stream.infrastructure.webhook import OutboxDispatcher, verify_signature
+
+    got = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            got.append((dict(self.headers), body))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    store = SqlAlchemyJobStore("sqlite://")
+    store.migrate()
+    payload = {"event": "live.ended", "session_id": "abc123", "lines": [{"id": 0, "text": "merhaba"}]}
+    store.add_event("live.ended", f"http://127.0.0.1:{srv.server_port}/hook", payload)
+    try:
+        assert OutboxDispatcher(store, secret="gizli").run_once() == 1
+    finally:
+        srv.shutdown()
+    headers, body = got[0]
+    assert headers["X-Event"] == "live.ended" and headers["X-Session-Id"] == "abc123"
+    assert headers["X-Job-Id"] == "" and headers["X-Delivery-Id"]
+    assert verify_signature("gizli", headers["X-Timestamp"], body, headers["X-Signature"])
+    assert json.loads(body) == payload
+    assert store.outbox_rows()[0]["sent_at"] is not None
+
+
+def test_ise_bagli_olmayan_eski_bildirim_saklama_suresinde_silinir():
+    from live_stream.infrastructure.db import SqlAlchemyJobStore
+
+    store = SqlAlchemyJobStore("sqlite://")
+    store.migrate()
+    store.add_event("live.ended", "http://h/x", {"session_id": "s"})
+    assert store.delete_finished_before(datetime.now(timezone.utc) - timedelta(days=1)) == 0
+    assert len(store.outbox_rows()) == 1                       # yeni: kalır
+    store.delete_finished_before(datetime.now(timezone.utc) + timedelta(seconds=1))
+    assert store.outbox_rows() == []                           # eski: silinir

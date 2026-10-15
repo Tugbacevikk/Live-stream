@@ -351,3 +351,87 @@ def test_model_yuklenemezse_hata_mesaji(tmp_path, monkeypatch):
     with TestClient(app) as client, client.websocket_connect("/ws/live") as ws:
         m = ws.receive_json()
     assert m["type"] == "error" and "CUDA yok" in m["message"]
+
+
+# ------------------------------------------------------------- oturum sonu bildirimi (webhook)
+HOOK = "https://alici.ornek.com/hook"
+
+
+def outbox(store, event=None):
+    return [r for r in store.outbox_rows() if event is None or r["event"] == event]
+
+
+def test_oturum_bitince_live_ended_ve_toplu_ise_ayni_adres(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
+    app, store, sent = make_local(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        assert client.get("/live/health").json()["webhook"] is True
+        _, msgs, done = session(client, "/ws/live?partial_sec=0", TWO)
+
+    assert done["webhook"] is True and done["session_id"] and done["job_id"]
+    [row] = outbox(store, "live.ended")
+    p = row["payload"]
+    assert row["url"] == HOOK and row["job_id"] == done["job_id"]
+    assert p["event"] == "live.ended" and p["session_id"] == done["session_id"] and p["reason"] == "stop"
+    assert p["language"] == {"code": "tr", "source": "secim", "confidence": 1.0}
+    finals = [m for m in msgs if m["type"] == "final"]
+    assert [ln["text"] for ln in p["lines"]] == [m["text"] for m in finals]
+    assert p["lines"][0] == {"id": 0, "start": finals[0]["start"], "end": finals[0]["end"], "text": finals[0]["text"]}
+    assert p["text"] == " ".join(m["text"] for m in finals) and p["job_id"] == done["job_id"]
+    assert p["duration"] == pytest.approx(len(TWO) / SR, abs=0.1) and p["started_at"] <= p["ended_at"]
+    assert p["recording"]
+    # konuşmacı ayrımı aynı adrese 'job.done' gönderecek: iş aynı callback ve oturum kimliğiyle açıldı
+    job = store.get(done["job_id"]).job
+    assert job.callback_url == HOOK and job.external_id == f"live:{done['session_id']}"
+
+
+def test_oturum_basina_callback_adresi_ve_analizsiz_oturum(local):
+    app, store, sent, _ = local                      # LIVE_WEBHOOK_URL yok
+    with TestClient(app) as client:
+        _, _, done = session(client, f"/ws/live?analyze=0&callback_url={HOOK}", TWO)
+    assert done["webhook"] is True and done["job_id"] is None and sent == []
+    [row] = outbox(store, "live.ended")
+    assert row["url"] == HOOK and row["job_id"] is None and row["payload"]["job_id"] is None
+
+
+def test_adres_yoksa_bildirim_yok(local):
+    app, store, _, _ = local
+    with TestClient(app) as client:
+        assert client.get("/live/health").json()["webhook"] is False
+        _, _, done = session(client, "/ws/live", TWO)
+    assert done["webhook"] is False and outbox(store) == []
+
+
+def test_gecersiz_callback_reddedilir(local):
+    app, store, _, _ = local
+    with TestClient(app) as client, client.websocket_connect("/ws/live?callback_url=ftp://x/y") as ws:
+        m = ws.receive_json()
+    assert m["type"] == "error" and "http" in m["message"] and outbox(store) == []
+
+
+def test_baglanti_koparsa_da_bildirilir(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
+    app, store, sent = make_local(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live?partial_sec=0") as ws:
+            ws.receive_json()
+            speak(ws, np.concatenate([tone(1.5), silence(1.0)]))
+            time.sleep(0.3)                           # son paket işlensin; "stop" gönderilmeden çık
+        for _ in range(50):                           # sunucu kopmayı arka planda işler
+            if outbox(store, "live.ended"):
+                break
+            time.sleep(0.1)
+    [row] = outbox(store, "live.ended")
+    assert row["payload"]["reason"] == "disconnect" and row["payload"]["lines"]
+    assert row["job_id"] and len(sent) == 1           # kayıt yine de konuşmacı ayrımına gitti
+
+
+def test_otomatik_dilde_bildirimde_tespit_bilgisi(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_WEBHOOK_URL", HOOK)
+    app, store, _ = make_local(tmp_path, monkeypatch, detect=lambda a: Decision("vi", 0.91))
+    with TestClient(app) as client:
+        session(client, "/ws/live?language=auto&partial_sec=0", TWO)
+    [row] = outbox(store, "live.ended")
+    assert row["payload"]["language"] == {"code": "vi", "source": "tespit", "confidence": 0.91}

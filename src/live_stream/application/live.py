@@ -156,6 +156,7 @@ class LiveSession:
         self.recorder = recorder
         self._context: deque[str] = deque(maxlen=context_sentences)  # Whisper'a bağlam
         self._next_id = 0
+        self.items: list[dict] = []  # kesinleşen satırlar (oturum sonu bildirimi bunları taşır)
 
     @staticmethod
     def pcm16_to_float(chunk: bytes) -> np.ndarray:
@@ -183,6 +184,7 @@ class LiveSession:
         self._context.append(text)
         item = {"type": "final", "id": self._next_id, "start": job.start, "end": job.end, "text": text}
         self._next_id += 1
+        self.items.append({k: item[k] for k in ("id", "start", "end", "text")})
         if self.recorder:
             self.recorder.write_final(item)
         return item
@@ -231,3 +233,28 @@ class LanguageLock:
             self.code, self.confidence = self.fallback, None
         self.detected = True
         return self.code
+
+
+def ended_payload(session_id: str, lock: LanguageLock, items: list[dict], *, started_at: str,
+                  ended_at: str, duration: float, reason: str, job_id: str | None,
+                  recording: str | None) -> dict:
+    """Canlı oturum bitti bildiriminin gövdesi ('live.ended').
+
+    reason: "stop" (Durdur'a basıldı) | "disconnect" (bağlantı koptu).
+    job_id: konuşmacı ayrımı için açılan toplu iş; bitince aynı adrese 'job.done' gider
+    (o bildirimde konuşmacılı satırlar vardır). Açılmadıysa None.
+    language.source: "secim" (kullanıcı seçti) | "tespit" (otomatik, ilk cümleden)."""
+    return {
+        "event": "live.ended",
+        "session_id": session_id,
+        "reason": reason,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration": round(duration, 2),
+        "language": {"code": lock.code, "source": "tespit" if lock.detected else "secim",
+                     "confidence": lock.confidence},
+        "lines": items,
+        "text": " ".join(i["text"] for i in items),
+        "recording": recording,
+        "job_id": job_id,
+    }

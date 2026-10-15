@@ -92,6 +92,7 @@ iş durumuyla aynı işlemde yazılır: sunucu çökse de kaybolmaz.
 | `job.done` | Bitti | Bölüm 3'teki sonuç |
 | `job.failed` | Hata, deneme hakkı bitti | `{"job_id", "status": "failed", "error"}` |
 | `job.rejected` | Bilinçli ret | `{"job_id", "status": "rejected", "error"}` |
+| `live.ended` | Canlı altyazı oturumu bitti (Bölüm 4.1) | Oturumun canlı metni, dili, süresi, `job_id` |
 
 Başlıklar:
 
@@ -99,7 +100,8 @@ Başlıklar:
 Content-Type: application/json; charset=utf-8
 User-Agent: live-stream-webhook/1
 X-Event: job.done
-X-Job-Id: <job_id>
+X-Job-Id: <job_id>                             (işe bağlı değilse boş)
+X-Session-Id: <oturum kimliği>                 (yalnızca live.ended)
 X-Delivery-Id: <bu teslimin kimliği>
 X-Timestamp: <unix saniye>                     (WEBHOOK_SECRET tanımlıysa)
 X-Signature: sha256=<hex HMAC>                 (WEBHOOK_SECRET tanımlıysa)
@@ -118,6 +120,51 @@ X-Signature: sha256=<hex HMAC>                 (WEBHOOK_SECRET tanımlıysa)
   `asr_webhook_deliveries{state="olu"}` izlenebilir.
 - Kurulum sırasında: `POST /webhooks/test {"url": "..."}` imzalı bir `ping` gönderir ve alıcının
   yanıt kodunu döner.
+
+### 4.1 Canlı oturum bitti (`live.ended`)
+
+Canlı altyazı oturumu bittiğinde (konuşmacı **Durdur**'a bastığında ya da bağlantı koptuğunda)
+iki bildirim gider, ikisi de aynı adrese ve aynı kurallarla (imza, tekrar, ölü teslim):
+
+1. **`live.ended`** — hemen: ekranda görünen canlı metin.
+2. **`job.done`** — kayıt konuşmacı ayrımından geçince (birkaç saniye ile birkaç dakika):
+   Bölüm 3'teki sonuç, kimin ne söylediği satır satır. `job_id` iki bildirimde aynıdır;
+   işin `external_id`'si `live:<session_id>`.
+
+Adres: sunucuda `LIVE_WEBHOOK_URL` (bütün oturumlar) ya da oturum başına
+`ws://<sunucu>/ws/live?callback_url=https://...` (öncelikli). Adres yoksa bildirim gitmez.
+Adres, `callback_url` ile aynı denetimden geçer (production'da iç ağ adresleri yalnızca
+`WEBHOOK_ALLOWED_HOSTS` ile).
+
+```json
+{
+  "event": "live.ended",
+  "session_id": "3f9c1b2e8d4a4f0c9e6b7a1d2c3e4f50",
+  "reason": "stop",
+  "started_at": "2026-10-15T07:30:02+00:00",
+  "ended_at": "2026-10-15T07:52:41+00:00",
+  "duration": 1358.4,
+  "language": {"code": "tr", "source": "secim", "confidence": 1.0},
+  "lines": [
+    {"id": 0, "start": 1.2, "end": 4.9, "text": "Herkese merhaba, ben Tuğba."},
+    {"id": 1, "start": 5.6, "end": 11.0, "text": "Bugün canlı altyazı sistemini anlatacağım."}
+  ],
+  "text": "Herkese merhaba, ben Tuğba. Bugün canlı altyazı sistemini anlatacağım.",
+  "recording": "2026-10-15_10-30-02",
+  "job_id": "a1b2c3d4e5f6..."
+}
+```
+
+| Alan | Açıklama |
+|---|---|
+| `reason` | `stop` (Durdur) ya da `disconnect` (bağlantı koptu; kalan cümleler yine de işlendi) |
+| `duration` | Oturumda gelen sesin süresi (sn) |
+| `language.source` | `secim` (kullanıcı seçti) ya da `tespit` (Otomatik; ilk cümleden bulundu) |
+| `lines` | Kesinleşen satırlar; `start`/`end` oturum başından saniye. Türkçede büyük harf ve noktalama vardır, Vietnamcada yoktur |
+| `job_id` | Konuşmacı ayrımı için açılan toplu iş; `null`: analiz kapalıydı ya da hiç konuşma yoktu (o zaman `job.done` gelmez) |
+
+Canlı metin hızlı üretilir ve konuşmacı bilgisi taşımaz; kalıcı kayıt için `job.done`'daki
+sonucu esas alın.
 
 ### İmza doğrulama
 

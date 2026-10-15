@@ -125,6 +125,10 @@ class Settings:
     save_recordings: bool = field(default_factory=lambda: os.environ.get(
         "SAVE_RECORDINGS", "true").lower() in ("1", "true", "evet"))
     recordings_dir: str = field(default_factory=lambda: os.environ.get("RECORDINGS_DIR", "recordings"))
+    # Canlı oturum bitince bildirim (webhook) gidecek adres; boşsa gitmez. Oturum başına
+    # ws://.../ws/live?callback_url=... ile de verilebilir. Önce 'live.ended' (canlı metin),
+    # konuşmacı ayrımı bitince aynı adrese 'job.done' gider. İmza: WEBHOOK_SECRET.
+    live_webhook_url: str = field(default_factory=lambda: os.environ.get("LIVE_WEBHOOK_URL", "").strip())
     # Oturum bitince kayıt toplu işe gönderilsin: konuşmacı ayrımlı, düzeltilebilir transkript
     live_auto_analyze: bool = field(default_factory=lambda: os.environ.get(
         "LIVE_AUTO_ANALYZE", "true").lower() in ("1", "true", "evet"))

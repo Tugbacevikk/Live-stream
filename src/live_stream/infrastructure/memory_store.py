@@ -19,6 +19,7 @@ class MemoryJobStore:
         self.jobs: dict[str, JobRecord] = {}
         self.results: dict[str, Transcript] = {}
         self.events: list[tuple[str, str]] = []  # (job_id, olay) — outbox yerine
+        self.outbox: list[dict] = []  # add_event ile yazılanlar (testler gövdeye bakar)
         self._lock = threading.Lock()
         self._originals: dict = {}
         self._edits: dict = {}
@@ -53,6 +54,11 @@ class MemoryJobStore:
         notify = r.job.notify if r.job.notify is not None else NOTIFY_DEFAULT
         if r.job.callback_url and event in notify:
             self.events.append((r.job.job_id, f"job.{event}"))
+
+    def add_event(self, event: str, url: str, payload: dict, job_id: str | None = None) -> None:
+        with self._lock:
+            self.events.append((job_id, event))
+            self.outbox.append({"job_id": job_id, "event": event, "url": url, "payload": payload})
 
     def set_status(self, job_id: str, status: JobStatus, error: str | None = None) -> None:
         r = self._update(job_id, status=status, error=error)

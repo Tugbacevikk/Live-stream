@@ -9,7 +9,8 @@ WebSocket protokolü
                       metin mesajı {"type": "stop"} = son parçayı işle ve kapat
                       sorgu parametreleri (isteğe bağlı): language (tr | vi | auto),
                       silence_ms, partial_sec, max_sec, save (1/0),
-                      analyze (1/0: oturum sonu toplu işe gönder)
+                      analyze (1/0: oturum sonu toplu işe gönder),
+                      callback_url (oturum bitince bildirim; yoksa LIVE_WEBHOOK_URL)
   Sunucu -> İstemci : {"type": "ready", "language": "tr"|"auto", "device": "cuda", "model": "...",
                        "recording": "..."}
                       {"type": "language", "code": "vi", "confidence": 0.97, "model": "...",
@@ -19,8 +20,14 @@ WebSocket protokolü
                       {"type": "discard", "start": 3.1}
                       {"type": "stats", "lag_sec": 0.4}
                       {"type": "error", "message": "..."}
-                      {"type": "done", "job_id": "..." | null}  job_id: konuşmacı ayrımlı
-                      transkript için açılan toplu iş (GET /jobs/{job_id})
+                      {"type": "done", "session_id": "...", "job_id": "..." | null,
+                       "webhook": true}  job_id: konuşmacı ayrımlı transkript için açılan toplu
+                      iş (GET /jobs/{job_id}); webhook: oturum sonu bildirimi kuyruğa yazıldı
+
+Oturum sonu bildirimi (webhook): oturum bitince (Durdur ya da bağlantı kopması) callback
+adresine 'live.ended' gider (canlı metin, dil, süre, job_id); konuşmacı ayrımı bitince aynı
+adrese toplu işin 'job.done' bildirimi gider. İkisi de outbox'tan, imzalı ve tekrar denemeli
+(docs/entegrasyon.md).
 """
 from __future__ import annotations
 
@@ -29,18 +36,24 @@ import json
 import logging
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from live_stream.application.live import FinalJob, LanguageLock, LiveSession, Segmenter, SegmenterConfig
+from live_stream.application.live import (
+    FinalJob, LanguageLock, LiveSession, Segmenter, SegmenterConfig, ended_payload,
+)
 from live_stream.infrastructure.recorder import SessionRecorder
+from live_stream.interface.security import callback_problem
 
 log = logging.getLogger(__name__)
 _PAGE = Path(__file__).parent / "static" / "canli.html"
 LANG_NAMES = {"tr": "Türkçe", "vi": "Vietnamca"}
+_background: set[asyncio.Task] = set()  # iptalden korunan oturum sonu görevleri
 
 
 class LiveEngine:
@@ -87,11 +100,17 @@ class LiveEngine:
         return self.asr.transcribe_text(audio, fast=fast, prompt=prompt, normalizer=self.normalizer)
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], detector_factory: Callable,
-                    submit_recording: Callable[[str, str | None], str | None] | None = None,
-                    detect_language: Callable | None = None) -> None:
+                    submit_recording: Callable[..., str | None] | None = None,
+                    detect_language: Callable | None = None,
+                    notify_ended: Callable[[str, dict, str | None], None] | None = None) -> None:
     """engines: dil kodu -> motor. detect_language(ses) -> LanguageDecision ('auto' için).
-    submit_recording(ses yolu, dil) -> toplu iş kimliği: oturum sonu konuşmacı ayrımı için."""
+    submit_recording(ses yolu, dil, callback_url, session_id) -> toplu iş kimliği: oturum sonu
+    konuşmacı ayrımı için. notify_ended(url, gövde, job_id): 'live.ended' bildirimini outbox'a yazar."""
     languages = list(engines)
     default = settings.live_language if settings.live_language in (*languages, "auto") else languages[0]
     infer_lock = asyncio.Lock()  # çıkarımlar sırayla: birden çok canlı bağlantı GPU'yu boğmasın
@@ -112,6 +131,7 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
                           for c, e in engines.items()],
             "default": default,
             "auto": len(languages) > 1 and detect_language is not None,
+            "webhook": bool(settings.live_webhook_url and notify_ended),
             "ready": all(e.asr is not None for e in engines.values()),
         }
 
@@ -128,6 +148,12 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             analyze = save and q.get("analyze", "1" if settings.live_auto_analyze else "0") == "1"
         except ValueError:
             await ws.send_json({"type": "error", "message": "Geçersiz ayar değeri."})
+            await ws.close()
+            return
+        callback = (q.get("callback_url") or settings.live_webhook_url or "").strip() or None
+        problem = callback_problem(callback, settings)
+        if problem:
+            await ws.send_json({"type": "error", "message": problem})
             await ws.close()
             return
         lang = q.get("language", default).strip().lower()
@@ -148,6 +174,7 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             return
 
         lock = LanguageLock(None if lang == "auto" else lang, detect_language, fallback=languages[0])
+        session_id, started_at = uuid.uuid4().hex, _now()
 
         def transcribe(audio, fast, prompt):
             code = lock.decide(audio, final=not fast)
@@ -206,8 +233,9 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             finally:
                 partial_busy = False
 
-        async def finish() -> str | None:
-            """Kalan cümleleri işler, kaydı kapatır, istenirse toplu işe gönderir."""
+        async def finish(reason: str) -> tuple[str | None, bool]:
+            """Kalan cümleleri işler, kaydı kapatır, istenirse toplu işe gönderir ve oturum
+            sonu bildirimini yazar. -> (toplu iş kimliği, bildirim yazıldı mı)"""
             for job in session.segmenter.flush():
                 finals.put_nowait(job)
             finals.put_nowait(None)
@@ -216,13 +244,24 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
             except Exception:
                 worker.cancel()
             path = session.close()
-            if not (analyze and path and submit_recording and session.lines):
-                return None
+            job_id = None
+            if analyze and path and submit_recording and session.lines:
+                try:  # toplu iş aynı callback'i alır: konuşmacı ayrımı bitince 'job.done'
+                    job_id = await asyncio.to_thread(submit_recording, path, lock.code, callback, session_id)
+                except Exception as e:
+                    log.warning("kayıt toplu işe gönderilemedi: %s", e)
+            if not (callback and notify_ended):
+                return job_id, False
+            payload = ended_payload(session_id, lock, session.items, started_at=started_at,
+                                    ended_at=_now(), duration=session.segmenter.stream_time,
+                                    reason=reason, job_id=job_id,
+                                    recording=recorder.name if recorder else None)
             try:
-                return await asyncio.to_thread(submit_recording, path, lock.code)
-            except Exception as e:
-                log.warning("kayıt toplu işe gönderilemedi: %s", e)
-                return None
+                await asyncio.to_thread(notify_ended, callback, payload, job_id)
+                return job_id, True
+            except Exception as e:  # bildirim yazılamadı: oturum yine de düzgün kapansın
+                log.exception("oturum sonu bildirimi yazılamadı: %s", e)
+                return job_id, False
 
         worker = asyncio.create_task(final_worker())
         first = engines[lang] if lang != "auto" else None
@@ -253,16 +292,25 @@ def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], dete
                         continue
                     if data.get("type") == "stop":
                         finished = True
-                        job_id = await finish()
-                        await send({"type": "done", "job_id": job_id})
+                        job_id, notified = await finish("stop")
+                        await send({"type": "done", "session_id": session_id, "job_id": job_id,
+                                    "webhook": notified})
                         await ws.close()
                         break
         except WebSocketDisconnect:
             pass
         finally:
             if not finished:
-                # bağlantı koptu: kalan cümleler yine de kayda geçer ve analiz edilir
-                await finish()
+                # bağlantı koptu: kalan cümleler yine de kayda geçer, analiz edilir, bildirilir.
+                # Ayrı görev + shield: bu işleyici iptal edilse de (sunucu kapanışı, istemci
+                # kütüphanesinin iptali) kayıt kapanır ve bildirim yazılır.
+                task = asyncio.get_running_loop().create_task(finish("disconnect"))
+                _background.add(task)
+                task.add_done_callback(_background.discard)
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
 
     app.add_api_websocket_route("/ws/live", ws_endpoint)
     app.add_api_websocket_route("/ws", ws_endpoint)

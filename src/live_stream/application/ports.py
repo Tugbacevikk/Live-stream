@@ -109,6 +109,11 @@ class JobStore(ResultRepository, Protocol):
         (silinecekse çağıran siler). İş yoksa None."""
         ...
 
+    def add_event(self, event: str, url: str, payload: dict, job_id: str | None = None) -> None:
+        """İş durumundan bağımsız bildirimi outbox'a yazar (ör. 'live.ended'). Aynı göndericiden,
+        aynı imza ve tekrar kurallarıyla gider."""
+        ...
+
     def fail(self, job_id: str, error: str) -> None:
         """Son karar: iş FAILED ve (callback varsa) 'job.failed' bildirimi tek işlemde.
         set_status(FAILED) yalnızca kaydeder; tekrar denenecek ara hatalar bildirim üretmez."""

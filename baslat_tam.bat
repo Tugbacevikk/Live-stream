@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 > nul
 rem ================================================================
-rem  TAM MOD (sunucu, 4000 mesaj): API + Türkçe worker'ı + bildirim + bakım.
+rem  TAM MOD (sunucu, 4000 mesaj): API + dil tespiti + Türkçe + Vietnamca worker'ları + bildirim + bakım.
 rem  Canlı altyazı bu modda yok; o, yerel modda (baslat.bat) çalışır.
 rem  PostgreSQL ve Redis çalışıyor olmalı (DATABASE_URL, REDIS_URL: .env).
 rem  Docker Desktop varsa ikisini şöyle açabilirsiniz:
@@ -19,6 +19,8 @@ if not exist ".env" copy ".env.example" ".env" > nul
 
 start "Ses Analizi - API"        cmd /k "%PY% -m uvicorn live_stream.interface.api:app --host 127.0.0.1 --port 8000"
 timeout /t 5 /nobreak > nul
+start "Ses Analizi - Dil"        cmd /k "%PY% -m live_stream.interface.stream_worker --kuyruk lid"
+start "Ses Analizi - Vietnamca"  cmd /k "%PY% -m live_stream.interface.stream_worker --kuyruk vi"
 start "Ses Analizi - Turkce"     cmd /k "%PY% -m live_stream.interface.stream_worker --kuyruk tr --surec 1"
 start "Ses Analizi - Bildirim"   cmd /k "%PY% -m live_stream.interface.dispatcher"
 start "Ses Analizi - Bakim"      cmd /k "%PY% -m live_stream.interface.bakim"

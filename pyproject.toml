@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "live-stream"
-version = "0.4.0"
-description = "Türkçe ses -> metin: konuşmacı ayrımlı toplu iş + canlı altyazı (faster-whisper, sherpa-onnx)"
+version = "0.5.0"
+description = "Ses -> metin (Türkçe, Vietnamca): konuşmacı ayrımlı toplu iş + canlı altyazı (faster-whisper, Zipformer)"
 requires-python = ">=3.10"
 dependencies = [
     "sherpa-onnx>=1.12",
@@ -15,6 +15,7 @@ dependencies = [
     "onnxruntime",
     "scipy",
     "faster-whisper>=1.1",  # Türkçe varsayılan model (CTranslate2)
+    "sentencepiece",        # Vietnamca terim listesi için bpe.vocab (scripts/download_models.py)
 ]
 
 [project.optional-dependencies]

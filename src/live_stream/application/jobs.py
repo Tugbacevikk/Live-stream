@@ -5,8 +5,9 @@
     RunTranscription 'asr.<dil>' kuyruğu: kayıttaki dil kararıyla metne çevirir
 
 Neden dil tespiti ayrı kuyruk? Her ASR worker'ı yalnızca kendi dilinin modelini
-yükler. Şimdilik tek dil (Türkçe) var: tespit adımı atlanır, iş doğrudan 'asr.tr'
-kuyruğuna gider. İkinci dil eklenince tespit kuyruğu yeniden devreye girer.
+yükler (faster-whisper medium ~1,5 GB, Zipformer 0,5 GB). Tespit hafif (Whisper-tiny) ve
+ses başına ~0,25 sn; ayrı küçük bir worker yeter. Tek dil açıksa (LANGUAGES=tr) tespit
+adımı atlanır, iş doğrudan o dilin kuyruğuna gider.
 """
 from __future__ import annotations
 

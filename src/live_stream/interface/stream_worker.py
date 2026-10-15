@@ -1,8 +1,8 @@
 """Kuyruk worker'ı (Redis Streams; Windows, Linux ve Docker'da aynı komut).
 
-    python -m live_stream.interface.stream_worker --kuyruk tr           # Türkçe
+    python -m live_stream.interface.stream_worker --kuyruk lid          # dil tespiti
+    python -m live_stream.interface.stream_worker --kuyruk vi           # Vietnamca
     python -m live_stream.interface.stream_worker --kuyruk tr --surec 1 # Türkçe, 1 süreç
-    python -m live_stream.interface.stream_worker --kuyruk lid          # dil tespiti (2+ dil varken)
 
 --surec verilmezse: lid için 1, ASR kuyrukları için kullanılabilir çekirdek / ONNX_THREADS.
 Her süreç modeli bir kez yükler ve kuyruktan tek tek iş alır. Süreçler Windows'ta da
@@ -73,7 +73,7 @@ def _run(queue: str) -> None:
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Kuyruk worker'ı (Redis Streams)")
-    p.add_argument("--kuyruk", required=True, help="tr (ya da 2+ dil varken lid)")
+    p.add_argument("--kuyruk", required=True, help="lid, vi ya da tr")
     p.add_argument("--surec", type=int, default=None, help="süreç sayısı (varsayılan: otomatik)")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(processName)s %(message)s")

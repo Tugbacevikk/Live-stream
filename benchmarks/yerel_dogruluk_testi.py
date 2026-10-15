@@ -2,12 +2,15 @@
 
 TSV sütunları: dosya, metin (doğru metin), isteğe bağlı rol. Yollar TSV'ye göre olabilir.
 
-    python benchmarks/yerel_dogruluk_testi.py tr.tsv                        # tüm Türkçe modeller
-    python benchmarks/yerel_dogruluk_testi.py tr.tsv --modeller faster-whisper-medium,faster-whisper-small
+    python benchmarks/yerel_dogruluk_testi.py ornek.tsv                     # vi: iki Zipformer
+    python benchmarks/yerel_dogruluk_testi.py tr.tsv --dil tr               # tr: Omnilingual + Whisper
+    python benchmarks/yerel_dogruluk_testi.py ornek.tsv --modeller zipformer-68m
 
-Hat üretimdekiyle aynıdır: Omnilingual'e sesin tamamı (en sessiz anlardan bölünmüş),
-Whisper'a yalnızca VAD parçaları verilir. Karşılaştırmadan önce iki taraf da (Türkçe
-kuralıyla) küçük harfe çevrilir, noktalama ve köşeli parantezler silinir.
+Hat üretimdekiyle aynıdır: Zipformer/Omnilingual'e sesin tamamı (en sessiz anlardan
+bölünmüş), Whisper'a yalnızca VAD parçaları verilir.
+Vietnamcada WER = hece hata oranı (her hece ayrı yazılır). Karşılaştırmadan önce iki
+taraf da küçük harfe çevrilir, noktalama ve köşeli parantezler silinir (VietMed'de
+[ ] içi araya giren konuşmacıdır; sözcükler sayılır, işaretler sayılmaz).
 Sonuç ekrana ve sonuc_yerel_<dil>.json dosyasına yazılır.
 """
 from __future__ import annotations
@@ -41,7 +44,7 @@ def norm(text: str, lang: str) -> str:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("tsv")
-    p.add_argument("--dil", default="tr", choices=["tr"])
+    p.add_argument("--dil", default="vi", choices=["vi", "tr"])
     p.add_argument("--modeller", default=None, help="virgülle; varsayılan: o dilin tüm modelleri")
     p.add_argument("--models-dir", default="models")
     p.add_argument("--threads", type=int, default=2)

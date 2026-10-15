@@ -14,7 +14,7 @@ X-API-Key: <API_KEY>  (API_KEY tanımlıysa; production'da zorunlu)
 | Alan | Zorunlu | Açıklama |
 |---|---|---|
 | `file` | evet | Ses dosyası. WAV, MP3, FLAC, OGG, OPUS; M4A/AAC/AMR/WEBM için sunucuda ffmpeg gerekir |
-| `language` | hayır | `tr` ya da `auto` (varsayılan). Şimdilik tek dil: ikisi aynı sonucu verir |
+| `language` | hayır | `tr`, `vi` ya da `auto` (varsayılan). `auto`: dil sesten bulunur (yalnızca bir dil açıksa o dil) |
 | `num_speakers` | hayır | Biliniyorsa konuşmacı sayısı (1–20). `1` verilirse konuşmacı ayırma hiç çalışmaz (daha hızlı) |
 | `callback_url` | hayır | İş bitince sonucun POST edileceği adres |
 | `notify` | hayır | Hangi olaylarda bildirim gitsin, virgülle: `running,done,failed,rejected`. Boşsa `NOTIFY_EVENTS` (varsayılan `done,failed,rejected`) |

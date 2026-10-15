@@ -1,6 +1,6 @@
-# Canlı Altyazı + Ses Analizi (Türkçe)
+# Canlı Altyazı + Ses Analizi (Türkçe, Vietnamca)
 
-Türkçe konuşmayı metne çevirir; iki şekilde:
+Türkçe ve Vietnamca konuşmayı metne çevirir; iki şekilde:
 
 - **Canlı altyazı** — konuşurken sözler ekranda (laptop ya da projeksiyon) anında belirir.
   Konferans, sunum, ders için. Oturum bitince kayıt otomatik olarak analize gider.
@@ -8,9 +8,15 @@ Türkçe konuşmayı metne çevirir; iki şekilde:
   (konuşmacı ayrımı). Başka sistemlere API ve imzalı webhook ile bağlanır.
 
 İkisi **aynı modelleri ve aynı çekirdeği** kullanır; tamamen **çevrimdışı** çalışır.
+Dil seçilir ya da sesten bulunur.
+
+| Dil | Model | Not |
+|---|---|---|
+| Türkçe | faster-whisper medium (MIT) | Kelime zamanlı; GPU varsa GPU. Hızlı seçenekler: small, Omnilingual-300M |
+| Vietnamca | Zipformer-68M int8 (Apache-2.0) | Yalnızca CPU yeterli; gerçek zamanın ~40 katı hızlı. VietMed'de WER %10,1 |
 Bu repo üç projenin birleşimidir: Live-stream (canlı akış), Vietnamese-speech-to-text-models
 (ölçülmüş toplu iş çekirdeği) ve fine-tuning (ilk Türkçe sistem). Neyin nereden alındığı:
-[ADR 0007](docs/adr/0007-birlesik-turkce-sistem.md).
+[ADR 0007](docs/adr/0007-birlesik-sistem.md).
 
 ## Hızlı başlangıç (Windows)
 
@@ -18,7 +24,9 @@ Bu repo üç projenin birleşimidir: Live-stream (canlı akış), Vietnamese-spe
 baslat.bat
 ```
 
-İlk çalıştırmada modeller iner (~1,6 GB; internet bir kez gerekir), sonra sunucu açılır:
+İlk çalıştırmada modeller iner (~2,1 GB; internet bir kez gerekir), sonra sunucu açılır.
+Yalnızca bir dil isteniyorsa `.env` içinde `LANGUAGES=tr` (ya da `vi`): o dilin modeli iner,
+dil tespiti modeli yüklenmez.
 
 | Adres | Ne |
 |---|---|
@@ -52,8 +60,9 @@ Windows'ta DLL yolları uygulama tarafından ayarlanır.
 ```
 Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSocket /ws/live
                                                                      │
-       Silero VAD ─► cümle sonu (700 ms duraklama) ─┬─► ara metin   (beam 1, ~1,2 sn'de bir)
-                                                    └─► kesin metin (beam 5 + önceki cümleler) ─► ekran + disk
+       Silero VAD ─► cümle sonu (700 ms duraklama) ─┬─► ara metin   (~1,2 sn'de bir)
+                                                    └─► kesin metin ─► ekran + disk
+          dil: seçilen (tr | vi) ya da "otomatik": ilk cümleden bulunur, oturum boyunca sabit
                                                                      │
                                          oturum bitince .wav ─► toplu iş: konuşmacı ayrımlı transkript
 ```
@@ -64,6 +73,10 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
 | `Esc` | Sunum modundan çık |
 | `+` / `-` | Yazıyı büyüt / küçült |
 
+- **Dil:** sayfadaki listeden Türkçe, Vietnamca ya da Otomatik. Otomatikte ilk cümleden sonra
+  bulunan dil ve güveni ekranın sağ üstünde görünür. Türkçe: Whisper (ara metin beam 1, kesin
+  metin beam 5 + önceki cümleler, büyük harf ve noktalamalı). Vietnamca: Zipformer (küçük harf,
+  noktalamasız; çok hızlı olduğu için GPU gerekmez).
 - **Dosyayla test:** bir kaydı gerçek zaman hızında çalar; konferanstan önce evde prova için.
 - **Kayıtlar:** her oturum `recordings/` altına anında yazılır (çökmeye dayanıklı):
   `.wav` (ham ses), `.txt` (`[00:01:23] metin`), `.jsonl`.
@@ -76,7 +89,8 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
 
 - Laptop mikrofonu salon yankısını da alır; yaka mikrofonu ya da ses masası çıkışı kaliteyi çok
   artırır (ekrandaki listeden seçilir).
-- Sunumdaki özel terimleri ve adları `HOTWORDS`'e yazın (ör. `YOLOv8 TÜBİTAK Bursa Teknik`).
+- Sunumdaki özel terimleri ve adları `HOTWORDS`'e yazın (ör. `YOLOv8 TÜBİTAK Bursa Teknik`);
+  Vietnamca için `VI_HOTWORDS` bir terim dosyası (BÜYÜK HARF, ör. `hotwords/tibbi_vi.txt`).
 - Cümleler ortadan bölünüyorsa `END_SILENCE_MS`'i artırın (900–1000), metin geç geliyorsa azaltın.
 - Ekrandaki **gecikme** 2 sn'yi aşıyorsa `LIVE_MODEL=faster-whisper-small` (indirmek:
   `python scripts/download_models.py --tr faster-whisper-small`). Toplu iş medium'da kalır.
@@ -84,13 +98,15 @@ Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSoc
 ## Ses analizi (toplu iş)
 
 ```
-ses ─► 16 kHz mono ─► VAD (Silero) ─► ASR (faster-whisper, kelime zamanlı) ───────► kelimeler
+ses ─► 16 kHz mono ─► VAD (Silero) ─► dil ─► ASR (tr: faster-whisper, vi: Zipformer) ─► kelimeler
                          │                                                              │
                          └─► konuşmacı ayrımı (CAM++ imzası + spektral kümeleme) ───────┤
                                                                                         ▼
                                                     birleştirme ─► [0.1 - 3.7] speaker_00: ...
 ```
 
+- Dil istekte verilir (`tr`, `vi`) ya da sesten bulunur (Whisper-tiny, emin olamazsa -small);
+  desteklenmeyen dildeki ses reddedilir (`rejected`), yanlış modelle anlamsız metin üretilmez.
 - Konuşmacı sayısı istekte verilmezse sesten bulunur.
 - Whisper'ın sessizlikte uydurduğu kalıplar ("Altyazı M.K.", "İzlediğiniz için teşekkürler")
   ve tekrar döngüleri atılır; başka alfabeden uydurma kelimeler süzülür.
@@ -101,10 +117,11 @@ ses ─► 16 kHz mono ─► VAD (Silero) ─► ASR (faster-whisper, kelime za
   `python benchmarks/kabul_testi.py kayit.wav`.
 
 ```bash
-curl -F file=@kayit.wav http://localhost:8000/jobs                          # -> {"job_id": ...}
+curl -F file=@kayit.wav http://localhost:8000/jobs                          # dil sesten bulunur
+curl -F file=@kayit.wav -F language=vi http://localhost:8000/jobs           # Vietnamca
 curl -F file=@kayit.wav -F num_speakers=2 -F callback_url=https://ornek.com/hook http://localhost:8000/jobs
 curl http://localhost:8000/jobs/<job_id>                                     # durum + sonuç
-python -m live_stream.interface.cli kayit.wav --speakers 2                   # API'siz, tek dosya
+python -m live_stream.interface.cli kayit.wav --lang tr --speakers 2       # API'siz, tek dosya
 ```
 
 Bağlanacak sistem için alanlar, durumlar, webhook imzası ve tekrar kuralları:
@@ -127,10 +144,13 @@ Canlı altyazı bu modda yoktur; o, konuşmacının kendi bilgisayarında yerel 
 
 | Değişken | Varsayılan | Açıklama |
 |---|---|---|
+| `LANGUAGES` | `tr,vi` | Açık diller; tek dil yazılırsa tespit yapılmaz |
 | `TR_MODEL` | `faster-whisper-medium` | `faster-whisper-small` daha hızlı; `omnilingual-300m` en hızlı |
+| `VI_MODEL` | `zipformer-68m` | ya da ince ayarlı modelin klasörü (`finetune/`) |
+| `LIVE_LANGUAGE` | `tr` | Canlı sayfanın varsayılan dili: `tr`, `vi`, `auto` |
 | `WHISPER_DEVICE` | `auto` | `auto`, `cuda`, `cpu` (sunucuda `cpu`) |
-| `HOTWORDS` | — | Özel terimler ve adlar, boşlukla |
-| `LIVE_MODEL` | (TR_MODEL) | Canlı altyazının modeli; farklıysa ayrıca yüklenir |
+| `HOTWORDS` / `VI_HOTWORDS` | — | Türkçe terimler (boşlukla) / Vietnamca terim dosyası |
+| `LIVE_MODEL` | (TR_MODEL) | Türkçe canlı altyazının modeli; farklıysa ayrıca yüklenir |
 | `END_SILENCE_MS` | `700` | Cümle bitti demek için duraklama |
 | `PARTIAL_INTERVAL_SEC` | `1.2` | Ara metin sıklığı; yavaş bilgisayarda artırın ya da `0` |
 | `LIVE_AUTO_ANALYZE` | `true` | Oturum bitince konuşmacı ayrımlı transkript |
@@ -150,14 +170,18 @@ src/live_stream/
   domain/          veri tipleri (dış kütüphane yok)
   application/     iş kuralları ve portlar
     transcribe.py    toplu iş: dil → ASR → konuşmacı → birleştirme
-    live.py          canlı: cümle sonu tespiti (Segmenter) + oturum (LiveSession)
+    live.py          canlı: cümle sonu tespiti (Segmenter), oturum (LiveSession), dil kilidi
     jobs.py, fusion.py, coverage.py, language.py, maintenance.py, config.py, ports.py
   infrastructure/  modeller ve depolama
     faster_whisper_asr.py   Türkçe ASR (toplu + canlı, GPU→CPU yedeği)
-    sherpa_vad.py, live_vad.py, cluster_diarizer.py, sherpa_asr.py, recorder.py,
+    sherpa_asr.py           Vietnamca Zipformer (+ Türkçe yedekleri Omnilingual, Whisper-turbo)
+    whisper_lid.py          dil tespiti (Whisper-tiny → small)
+    sherpa_vad.py, live_vad.py, cluster_diarizer.py, recorder.py,
     db/ (SQLAlchemy + Alembic), redis_streams.py, thread_queue.py, webhook.py, catalog.py
   interface/       local_server.py (yerel: toplu + canlı), live_server.py, api.py (tam mod),
                    stream_worker.py, dispatcher.py, bakim.py, cli.py, static/ (index, canli)
+finetune/          Vietnamca Zipformer ince ayar hattı (WSL2 + GPU) ve Kapı 2
+hotwords/          Vietnamca terim listesi örneği
 benchmarks/ scripts/ tests/{unit,db,integration} docs/{adr, olcumler.md, entegrasyon.md}
 ```
 
@@ -175,16 +199,18 @@ python benchmarks/kabul_testi.py a.wav b.wav --es-zamanli 4
 ```
 
 Diğer ölçümler: `benchmarks/diyalog_testi.py` (DER, cpWER), `yerel_dogruluk_testi.py` (WER),
-`konusmaci_testi.py`, `turkce_dogruluk_testi.py`. Sonuçlar: [docs/olcumler.md](docs/olcumler.md).
+`konusmaci_testi.py`, `turkce_dogruluk_testi.py`, `dil_tespiti_testi.py`, `dogruluk_testi.py`
+(Vietnamca Zipformer). VietMed'den test seti: `scripts/vietmed_hazirla.py`. Sonuçlar: [docs/olcumler.md](docs/olcumler.md).
 
 ## Yol haritası
 
-- [x] Toplu iş çekirdeği (Vietnamese-speech-to-text-models'ten, Türkçe kısmı)
+- [x] Toplu iş çekirdeği (Vietnamese-speech-to-text-models'ten)
 - [x] Canlı altyazı çekirdeğe katıldı: aynı model, ONNX Silero (PyTorch'suz), oturum sonu toplu iş
+- [x] Vietnamca: toplu iş (Zipformer + dil tespiti) ve canlı altyazı (dil seçimi, otomatik dil)
 - [ ] Canlı ekranda konuşmacı etiketi (cümle başına CAM++ imzası, oturum sonunda kesinleşir)
 - [ ] Türkçe doğru metinli ölçüm: FLEURS tr + kendi sunum provası (WER, DER; canlı ve toplu)
 - [ ] Canlı mod için model karşılaştırması: medium / small / Omnilingual, gecikme × WER
-- [ ] İkinci dil (Vietnamca): Zipformer + dil tespiti, Vietnamca reposundan
+- [ ] Vietnamca ince ayarın çalıştırılması ve Kapı 2 kararı (`finetune/`)
 
 ## Lisans
 

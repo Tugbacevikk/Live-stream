@@ -1,6 +1,6 @@
-# 0007 — Tek repo, tek Türkçe sistem: toplu iş + canlı altyazı
+# 0007 — Tek repo, tek sistem: toplu iş + canlı altyazı (Türkçe, Vietnamca)
 
-**Tarih:** 15 Ekim 2026 · **Durum:** Kabul
+**Tarih:** 15 Ekim 2026 · **Durum:** Kabul (aynı gün güncellendi: Vietnamca eklendi, aşağıda)
 
 ## Bağlam
 
@@ -12,11 +12,12 @@
 - **Live-stream** — konferans için canlı altyazı, ~900 satır, kendi Whisper ve VAD kodu.
 
 Üçünde de ayrı birer faster-whisper sarmalayıcısı, Silero VAD sarmalayıcısı ve uydurma
-süzgeci vardı. Karar: **şimdilik yalnızca Türkçe**, **repo Live-stream**.
+süzgeci vardı. Karar: **repo Live-stream**; ilk adımda yalnızca Türkçe, aynı gün
+Vietnamca da eklendi.
 
 ## Karar
 
-Vietnamese-speech-to-text-models çekirdeği (Türkçe kısmı) Live-stream reposuna taşındı;
+Vietnamese-speech-to-text-models çekirdeği Live-stream reposuna taşındı;
 Live-stream'in canlı akışı bu çekirdeğin katmanlarına yerleşti. Paket adı `live_stream`.
 
 ### Bileşen bileşen karşılaştırma
@@ -34,8 +35,8 @@ Live-stream'in canlı akışı bu çekirdeğin katmanlarına yerleşti. Paket ad
 | Gürültü giderme (DeepFilterNet) | Var | Yok | Alınmadı | PyTorch ister, "1 dk ≤ 1 dk" hedefine uymuyor (ADR 0006) |
 | Üst üste konuşma, LLM düzeltme, S3 | Var | Yok | Alınmadı | ADR 0006'daki ölçüm ve gerekçeler |
 | Rust çekirdeği | Deneysel | `native/` (birleştirme, enerji kesimi, parça gruplama) | Alınmadı | Python sürümü birebir aynı sonucu veriyor; derleme zorunluluğu kalktı |
-| Dil tespiti (Whisper-tiny/small) | Yok | Var | Alınmadı, yeri hazır | Tek dil; `LanguageResolver` ve dil başına kuyruk duruyor |
-| Vietnamca (Zipformer, ince ayar hattı) | Yok | Var | Alınmadı | Kapsam dışı |
+| Dil tespiti (Whisper-tiny/small) | Yok | Var | Vietnamese | Toplu işte ve canlı modda "otomatik" seçimde |
+| Vietnamca (Zipformer-68M, ince ayar hattı) | Yok | Var | Vietnamese | Toplu iş + canlı altyazı |
 | Arayüz | Tek sayfa | Satır düzeltme/silme, RTTM, veri seti onayı | Vietnamese + canlı sayfa (`/canli`) | Live-stream'in sunum modu korundu |
 | Canlı altyazı | Yok | Yok | Live-stream | Segmenter, oturum kaydı, WebSocket protokolü |
 
@@ -56,6 +57,21 @@ Live-stream'in canlı akışı bu çekirdeğin katmanlarına yerleşti. Paket ad
 - Canlı ve toplu iş aynı süreçte aynı modeli paylaşır; `LIVE_MODEL` farklıysa (4 GB GPU'da
   `faster-whisper-small`) ikinci model ayrıca yüklenir.
 - Sunucu tarafı (tam mod, 4000 mesaj, yalnızca CPU) değişmedi; `WHISPER_DEVICE=cpu`.
-- İkinci dil eklemek: `catalog.py`'de model, `normalizer.py`'de biçim, bir `LanguageDetector`
-  (Vietnamca reposundaki `whisper_lid.py`). Uygulama katmanı değişmez.
+- `LANGUAGES=tr` ile tek dil: tespit adımı atlanır, iş doğrudan o dilin kuyruğuna gider,
+  dil tespiti modeli yüklenmez ve indirilmez.
+
+## Güncelleme: Vietnamca (15 Ekim 2026)
+
+- Toplu iş: Vietnamese reposundaki hali olduğu gibi (Zipformer-68M, sesin tamamı en sessiz
+  anlardan bölünür, Whisper-tiny → small dil tespiti, terim listesi, ince ayar hattı).
+- Canlı altyazı: dil oturum başında seçilir (`language=tr|vi|auto`). `auto`: ilk yeterince uzun
+  cümleden (≥1,5 sn ya da ilk kesin cümle) toplu işle aynı kademeli tespitle bulunur ve oturum
+  boyunca kilitlenir (`LanguageLock`); her cümlede tespit hem gecikme ekler hem kısa cümlede
+  yanılır. Desteklenmeyen dil ya da hata olursa ilk dil (tr) kullanılır.
+- Zipformer canlıda da aynı model nesnesidir; çok hızlı olduğu için ara metin her seferinde
+  baştan çözülür, `fast` kipi ve istem (prompt) ona uygulanmaz. Ekran biçimi: küçük harf.
+- Oturum kaydı oturumun diliyle toplu işe gider; dil bulunamadıysa toplu iş kendisi bulur.
+- Eski Vietnamca reposundaki bir hata düzeltildi: `sentencepiece` kurulu değilse model indirici
+  çöküyordu (bpe.vocab). Paket bağımlılıklara eklendi; yine de yoksa indirme sürer, yalnızca
+  Vietnamca terim listesi çalışmaz.
 - fine-tuning ve Vietnamese-speech-to-text-models başvuru kaynağı olarak kalır; güncel kod burası.

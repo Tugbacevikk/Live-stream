@@ -6,11 +6,11 @@
                    Sesler models/tts-test/ altına bir kez indirilir (~400 MB).
   --kaynak tsv X   Gerçek, tek konuşmacılı kayıtlardan diyalog kurar. TSV sütunları:
                    dosya, konusmaci (aynı kişinin kayıtları aynı etiket).
-
+                   VietMed'in referans.tsv dosyasında 'konusmaci' sütunu zaten var.
 
     python benchmarks/konusmaci_testi.py
     python benchmarks/konusmaci_testi.py --bosluksuz          # sıra değişiminde duraksama yok
-    python benchmarks/konusmaci_testi.py --kaynak tsv C:/turkce_test/referans.tsv
+    python benchmarks/konusmaci_testi.py --kaynak tsv C:/vietnamca_test/vietmed_1_2dk/referans.tsv
     python benchmarks/konusmaci_testi.py --diarizer pyannote  # eski yolla karşılaştırma
 """
 from __future__ import annotations
@@ -32,8 +32,13 @@ from live_stream.infrastructure.sherpa_vad import SileroVad
 from live_stream.interface.composition import build_diarizer, default_config
 
 TTS = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
-VOICES = {"tr": ["tr_TR-dfki-medium", "tr_TR-fahrettin-medium", "tr_TR-fettah-medium"]}
+VOICES = {"vi": ["vi_VN-vais1000-medium", "vi_VN-25hours_single-low", "vi_VN-vivos-x_low"],
+          "tr": ["tr_TR-dfki-medium", "tr_TR-fahrettin-medium", "tr_TR-fettah-medium"]}
 TEXT = {
+    "vi": ["Chào bác sĩ, hôm nay tôi bị đau đầu và sốt nhẹ.", "Bạn đã uống thuốc gì chưa?",
+           "Tôi bị ho khoảng ba ngày rồi.", "Bác sĩ khuyên tôi nên nghỉ ngơi và uống nhiều nước.",
+           "Huyết áp của anh hơi cao, cần theo dõi thêm.", "Chị có tiền sử bệnh tiểu đường không?",
+           "Ngày mai tôi sẽ đi xét nghiệm máu.", "Cảm ơn bác sĩ rất nhiều."],
     "tr": ["Merhaba doktor bey, iki gündür başım çok ağrıyor.", "Daha önce herhangi bir ilaç kullandınız mı?",
            "Ateşiniz var mı, ölçtünüz mü?", "Size bir kan tahlili yazacağım.",
            "Tansiyonunuz biraz yüksek görünüyor.", "Günde üç kez tok karnına alın.",

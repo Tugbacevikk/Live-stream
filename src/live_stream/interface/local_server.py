@@ -42,9 +42,10 @@ log = logging.getLogger(__name__)
 
 
 def build_local(settings: Settings, workers: int | None = None, warm_up: bool = True,
-                live_engine=None, live_detector=None):
+                live_engines=None, live_detector=None, live_detect=None):
     """Yerel sistemi kurar; (app, store, queue, dispatcher) döndürür (testler de kullanır).
-    live_engine/live_detector: testler için sahte canlı motor ve algılayıcı."""
+    live_engines/live_detector/live_detect: testler için sahte canlı motorlar (dil -> motor),
+    konuşma algılayıcı ve dil tespiti."""
     store = store_from_settings(settings, url=settings.local_db)
     store.migrate()
     n = workers or settings.concurrency
@@ -52,7 +53,8 @@ def build_local(settings: Settings, workers: int | None = None, warm_up: bool = 
     queue = ThreadJobQueue(asr_workers=n,
                            max_attempts=settings.max_job_attempts)
     pipeline = build_pipeline(cfg, store, with_detection=False)
-    detect = DetectLanguage(store, queue, SoundfileLoader(), SileroVad(cfg.vad), build_resolver(cfg))
+    resolver = build_resolver(cfg)
+    detect = DetectLanguage(store, queue, SoundfileLoader(), SileroVad(cfg.vad), resolver)
     queue.bind(detect, RunTranscription(store, pipeline), give_up=store.fail)
     if warm_up:  # ilk işte model yükleme gecikmesi olmasın
         for lang in settings.languages:
@@ -79,18 +81,20 @@ def build_local(settings: Settings, workers: int | None = None, warm_up: bool = 
                      readiness={"modeller": models_ready})
     app.state.maintenance = build_maintenance(store, settings)
 
-    # canlı altyazı: aynı süreç, aynı model; oturum kaydı bitince toplu işe gider
-    engine, detector = build_live(settings, cfg, pipeline.engines)
-    if live_engine is not None:
-        engine = live_engine
+    # canlı altyazı: aynı süreç, aynı modeller; oturum kaydı bitince toplu işe gider
+    engines, detector, detect_lang = build_live(settings, cfg, pipeline.engines, resolver)
+    if live_engines is not None:
+        engines, detect_lang = live_engines, live_detect
     submit = SubmitJob(store, queue, settings.languages)
 
-    def submit_recording(path: str) -> str:
-        return submit(AudioJob(uuid.uuid4().hex, path, settings.languages[0]))
+    def submit_recording(path: str, language: str | None) -> str:
+        """language: oturumun dili ('auto' oturumda bulunduysa o; yoksa toplu iş kendi bulur)."""
+        return submit(AudioJob(uuid.uuid4().hex, path, language))
 
-    add_live_routes(app, settings, engine, live_detector or detector, submit_recording)
-    if warm_up:  # canlı model açılışta arka planda yüklenir (ilk konuşmada beklenmesin)
-        engine.start_loading()
+    add_live_routes(app, settings, engines, live_detector or detector, submit_recording, detect_lang)
+    if warm_up:  # canlı modeller açılışta arka planda hazırlanır (ilk konuşmada beklenmesin)
+        for e in engines.values():
+            e.start_loading()
 
     return app, store, queue, dispatcher
 

@@ -1,10 +1,12 @@
-"""sherpa-onnx ASR adaptörleri (Türkçe için yedek seçenekler): Omnilingual CTC (hızlı), Whisper-turbo.
+"""sherpa-onnx ASR adaptörleri: Zipformer (vi), Whisper-turbo ve Omnilingual CTC (tr, yedek seçenekler).
 
-Varsayılan Türkçe model faster-whisper (faster_whisper_asr.py); bunlar TR_MODEL ile seçilir.
+Türkçenin varsayılanı faster-whisper (faster_whisper_asr.py). Hepsi canlı altyazıda da çalışır
+(transcribe_text): Zipformer çok hızlı olduğu için (gerçek zamanın ~40 katı) Vietnamca canlı
+altyazıda ara metin her seferinde baştan çözülebilir.
 
 Hepsi aynı arayüzü gerçekler: VAD parçaları -> mutlak zamanlı kelimeler.
 Zaman bilgisi modele göre değişir:
-  - Omnilingual: her parçanın başlangıç zamanı var.
+  - Zipformer, Omnilingual: her parçanın başlangıç zamanı var.
   - Whisper (sherpa-onnx): kelime zamanı YOK. Parça süresi kelimelere harf
     sayısıyla orantılı paylaştırılır (yaklaşık; VAD parçaları kısa olduğu için
     konuşmacı ataması çoğunlukla doğru kalır, ama hassasiyet düşer).
@@ -110,7 +112,8 @@ class _SherpaAsr:
     def _build(self, model: ModelRef, params: AsrParams):  # pragma: no cover - alt sınıfta
         raise NotImplementedError
 
-    def transcribe(self, segments: list[VadSegment]) -> list[Word]:
+    def transcribe(self, segments: list[VadSegment], normalizer: TextNormalizer | None = None) -> list[Word]:
+        """normalizer: çıktı biçimi (canlı altyazı kendi biçimini verir); yoksa toplu işinki."""
         out: list[Word] = []
         for batch in batches(segments, self.params.batch_seconds):
             streams = []
@@ -120,20 +123,44 @@ class _SherpaAsr:
                 streams.append(st)
             self.recognizer.decode_streams(streams)  # grup içinde toplu çözme: tek tek çağırmaktan hızlı
             for seg, st in zip(batch, streams):
-                out += self._words(st.result, seg)
+                out += self._words(st.result, seg, normalizer or self.normalizer)
             del streams  # grubun belleği bir sonrakinden önce bırakılır
         return out
 
     def transcribe_text(self, samples, fast: bool = False, prompt: str | None = None,
                         normalizer: TextNormalizer | None = None) -> str:
-        """Canlı altyazı: tek cümle -> metin. Bu modellerde hızlı kip ve istem yok; metin
-        toplu işin biçimindedir (küçük harf, noktalamasız)."""
-        return " ".join(w.text for w in self.transcribe([VadSegment(0.0, samples)]))
+        """Canlı altyazı: tek cümle -> metin. Bu modellerde hızlı kip ve istem yok (Zipformer
+        zaten çok hızlı); kelimeler verilen biçimle yazılır."""
+        return " ".join(w.text for w in self.transcribe([VadSegment(0.0, samples)], normalizer))
 
-    def _words(self, r, seg: VadSegment) -> list[Word]:
+    def _words(self, r, seg: VadSegment, normalizer: TextNormalizer) -> list[Word]:
         return tokens_to_words(list(r.tokens), list(r.timestamps), seg.start, seg.end,
-                               self.normalizer, self.params.max_word_duration,
+                               normalizer, self.params.max_word_duration,
                                list(getattr(r, "ys_log_probs", []) or []))
+
+
+class SherpaZipformerAsr(_SherpaAsr):
+    def _build(self, model, params):
+        kw = {}
+        if params.hotwords_file:
+            # bpe ayarı olmadan sherpa-onnx hotword dosyasını SESSİZCE yok sayar.
+            if not model.has("bpe_vocab"):
+                raise FileNotFoundError(
+                    "hotwords_file verildi ama bpe.vocab yok; hotword sessizce çalışmaz. "
+                    "scripts/download_models.py bunu üretir.")
+            if params.decoding_method != "modified_beam_search":
+                raise ValueError("hotword yalnızca modified_beam_search ile çalışır")
+            kw = dict(hotwords_file=params.hotwords_file, hotwords_score=params.hotwords_score,
+                      modeling_unit="bpe", bpe_vocab=model.path("bpe_vocab"))
+        return sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=model.path("encoder"), decoder=model.path("decoder"),
+            joiner=model.path("joiner"), tokens=model.path("tokens"),
+            num_threads=params.num_threads, decoding_method=params.decoding_method,
+            max_active_paths=params.max_active_paths, provider="cpu", **kw)
+
+
+# geriye dönük uyumluluk
+SherpaOnnxAsr = SherpaZipformerAsr
 
 
 class SherpaWhisperAsr(_SherpaAsr):
@@ -154,10 +181,10 @@ class SherpaWhisperAsr(_SherpaAsr):
             tokens=model.path("tokens"), language=self.language, task="transcribe",
             num_threads=params.num_threads, provider="cpu")
 
-    def _words(self, r, seg):
+    def _words(self, r, seg, normalizer):
         if self._key(r.text) in self._drop:
             return []
-        return spread_words(r.text, seg.start, seg.end, self.normalizer)
+        return spread_words(r.text, seg.start, seg.end, normalizer)
 
 
 class SherpaOmnilingualAsr(_SherpaAsr):
@@ -175,6 +202,8 @@ def build_asr(profile: LanguageProfile, normalizer: TextNormalizer):
 
 def _build_asr(profile: LanguageProfile, normalizer: TextNormalizer):
     kind = profile.asr_model.kind
+    if kind == "zipformer-transducer":
+        return SherpaZipformerAsr(profile.asr_model, profile.asr, normalizer)
     if kind == "whisper":
         return SherpaWhisperAsr(profile.asr_model, profile.asr, normalizer, profile.code)
     if kind == "omnilingual-ctc":

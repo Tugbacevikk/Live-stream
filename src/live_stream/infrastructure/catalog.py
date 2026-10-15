@@ -19,12 +19,26 @@ class Pack:
     license: str
     kind: str | None = None  # ASR ise adaptör türü
     files: dict[str, str] = field(default_factory=dict)
+    needs_bpe_vocab: bool = False
     keep: tuple[str, ...] = ()  # boş değilse açıldıktan sonra yalnızca bu dosyalar kalır
     hf_repo: str | None = None  # sherpa-onnx yerine Hugging Face deposundan (url_path kullanılmaz)
     hf_revision: str | None = None  # sabit sürüm (commit): aynı komut hep aynı dosyaları indirir
 
 
 ASR_PACKS: dict[str, Pack] = {
+    "zipformer-68m": Pack(
+        "asr-models/sherpa-onnx-zipformer-vi-int8-2025-04-20.tar.bz2",
+        "sherpa-onnx-zipformer-vi-int8-2025-04-20", "Apache-2.0", "zipformer-transducer",
+        {"encoder": "encoder-epoch-12-avg-8.int8.onnx", "decoder": "decoder-epoch-12-avg-8.onnx",
+         "joiner": "joiner-epoch-12-avg-8.int8.onnx", "tokens": "tokens.txt", "bpe_vocab": "bpe.vocab"},
+        needs_bpe_vocab=True),
+    "zipformer-30m": Pack(
+        "asr-models/sherpa-onnx-zipformer-vi-30M-int8-2026-02-09.tar.bz2",
+        "sherpa-onnx-zipformer-vi-30M-int8-2026-02-09",
+        "CC BY-NC-ND 4.0 (ticari kullanım ve ince ayar yasak)", "zipformer-transducer",
+        {"encoder": "encoder.int8.onnx", "decoder": "decoder.onnx", "joiner": "joiner.int8.onnx",
+         "tokens": "tokens.txt", "bpe_vocab": "bpe.vocab"},
+        needs_bpe_vocab=True),
     "whisper-turbo": Pack(
         "asr-models/sherpa-onnx-whisper-turbo.tar.bz2", "sherpa-onnx-whisper-turbo", "MIT",
         "whisper",
@@ -69,7 +83,12 @@ AUX_PACKS: dict[str, Pack] = {
         "speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
         "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
         "3D-Speaker / ModelScope (Apache-2.0 olduğu doğrulanacak)"),
-    # gerçek modelli testlerin sesleri (tests/integration): Türkçe ve başka dillerde birer cümle
+    "whisper-tiny-lid": Pack(
+        "asr-models/sherpa-onnx-whisper-tiny.tar.bz2", "sherpa-onnx-whisper-tiny", "MIT",
+        keep=("tiny-encoder.int8.onnx", "tiny-decoder.int8.onnx", "tiny-tokens.txt")),
+    "whisper-small-lid": Pack(
+        "asr-models/sherpa-onnx-whisper-small.tar.bz2", "sherpa-onnx-whisper-small", "MIT",
+        keep=("small-encoder.int8.onnx", "small-decoder.int8.onnx", "small-tokens.txt")),
     "lid-test-wavs": Pack(
         "asr-models/spoken-language-identification-test-wavs.tar.bz2",
         "spoken-language-identification-test-wavs", "test sesleri (sherpa-onnx)"),
@@ -89,32 +108,37 @@ AUX_PACKS: dict[str, Pack] = {
 # kullanıcının bilgisayarında oran 0,5-0,7 verdi. Ölçüm:
 #   python benchmarks/kabul_testi.py --dil tr kayit.wav   (1 dk ses <= 1 dk mı?)
 # Oran 1'i aşarsa sırasıyla: TR_MODEL=faster-whisper-small, sonra omnilingual-300m.
-DEFAULT_MODELS = {"tr": "faster-whisper-medium"}
-MODEL_CHOICES = {"tr": ["faster-whisper-medium", "faster-whisper-small", "omnilingual-300m",
+DEFAULT_MODELS = {"vi": "zipformer-68m", "tr": "faster-whisper-medium"}
+MODEL_CHOICES = {"vi": ["zipformer-68m", "zipformer-30m"],
+                 "tr": ["faster-whisper-medium", "faster-whisper-small", "omnilingual-300m",
                         "whisper-turbo"]}
 
 # Bellek tahmini (GB): (model ağırlığı — bir süreçte bir kez, iş başına çalışma belleği).
-# Model boyutundan (int8) ve kütüphane belgelerinden tahmin; faster-whisper'da iş başına değer,
-# aynı anda çalışan her işçinin modelin kopyasını tutma olasılığına göre ihtiyatlı seçildi.
+# Ölçülen: Zipformer-68M 10 sn'lik gruplarla tüm süreç 0,46 GB (12 Ekim). Diğerleri model
+# boyutundan (int8) ve kütüphane belgelerinden tahmin; faster-whisper'da iş başına değer, aynı
+# anda çalışan her işçinin modelin kopyasını tutma olasılığına göre ihtiyatlı seçildi.
 MODEL_MEMORY_GB: dict[str, tuple[float, float]] = {
+    "zipformer-68m": (0.2, 0.3),
+    "zipformer-30m": (0.1, 0.3),
     "omnilingual-300m": (0.4, 0.5),
     "whisper-turbo": (0.9, 0.8),
     "faster-whisper-small": (0.3, 0.5),
     "faster-whisper-medium": (0.8, 1.0),
 }
-# her süreçte bir kez: VAD + konuşmacı imzası + Python
-AUX_MEMORY_GB = 0.6
+# her süreçte bir kez: VAD + konuşmacı imzası + dil tespiti (Whisper tiny/small) + Python
+AUX_MEMORY_GB = 0.9
 
 
 def memory_estimate(model: str) -> tuple[float, float]:
-    """Katalogda olmayan model: en büyük Türkçe modelinki kadar varsayılır (ihtiyatlı)."""
-    return MODEL_MEMORY_GB.get(model, MODEL_MEMORY_GB["faster-whisper-medium"])
+    """Katalogda olmayan (klasör yolu verilen, ör. ince ayarlı Zipformer) model: Zipformer gibi."""
+    return MODEL_MEMORY_GB.get(model, MODEL_MEMORY_GB["zipformer-68m"])
 
 
 # Whisper'ın sessizlik/gürültüde uydurduğu, gözlenmiş cümleler. Parça YALNIZCA bunlardan
 # ibaretse atılır (cümlenin içinde geçen "teşekkür ederim" etkilenmez). Kaynak: toplu iş
 # projesindeki gözlem + Live-stream'in canlı kullanımda topladığı liste (Whisper'ın altyazı
-# verisinden ezberlediği kalıplar; kayda ya da kelimeye özel düzeltme değil).
+# verisinden ezberlediği kalıplar; kayda ya da kelimeye özel düzeltme değil). Zipformer
+# sessizlikte uydurmadığı için Vietnamcada liste yok.
 DROP_PHRASES = {"tr": (
     "İzlediğiniz için teşekkür ederim.", "İzlediğiniz için teşekkürler.", "Altyazı M.K.",
     "Altyazı", "Abone olmayı unutmayın.", "Abone olun.", "Videoyu beğenmeyi unutmayın.",
@@ -123,18 +147,54 @@ DROP_PHRASES = {"tr": (
 )}
 
 
+def lid_stages(models_dir: str | Path) -> tuple[tuple[str, str], ...]:
+    d = Path(models_dir)
+    return tuple((str(d / f"sherpa-onnx-whisper-{s}/{s}-encoder.int8.onnx"),
+                  str(d / f"sherpa-onnx-whisper-{s}/{s}-decoder.int8.onnx")) for s in ("tiny", "small"))
+
+
 def model_ref(key: str, models_dir: str | Path) -> ModelRef:
     p = ASR_PACKS[key]
     return ModelRef(name=key, kind=p.kind, folder=Path(models_dir) / p.target,
                     files=dict(p.files), license=p.license)
 
 
+def _pick(folder: Path, pattern: str, prefer_int8: bool) -> str:
+    found = sorted(folder.glob(pattern))
+    int8 = [f for f in found if f.name.endswith(".int8.onnx")]
+    fp32 = [f for f in found if not f.name.endswith(".int8.onnx")]
+    order = (int8 + fp32) if prefer_int8 else (fp32 + int8)
+    if not order:
+        raise FileNotFoundError(f"{folder} içinde {pattern} yok")
+    return order[0].name
+
+
+def folder_ref(folder: str | Path) -> ModelRef:
+    """Katalogda olmayan, klasörü verilen Zipformer (ör. ince ayarlı model; finetune/ çıktısı).
+    icefall export-onnx.py adlandırması: encoder/joiner int8, decoder fp32 (sherpa-onnx önerisi)."""
+    d = Path(folder)
+    files = {"encoder": _pick(d, "encoder*.onnx", True), "decoder": _pick(d, "decoder*.onnx", False),
+             "joiner": _pick(d, "joiner*.onnx", True), "tokens": "tokens.txt"}
+    if (d / "bpe.vocab").exists():
+        files["bpe_vocab"] = "bpe.vocab"
+    lic = (d / "LICENSE").read_text(encoding="utf-8").strip()[:200] if (d / "LICENSE").exists() else ""
+    return ModelRef(name=d.name, kind="zipformer-transducer", folder=d, files=files, license=lic)
+
+
+def is_folder_model(model: str | None) -> bool:
+    return bool(model) and ("/" in model or "\\" in model or Path(model).is_dir())
+
+
 def language_profile(code: str, models_dir: str | Path, model: str | None = None,
                      **params) -> LanguageProfile:
     key = model or DEFAULT_MODELS[code]
     params.setdefault("drop_phrases", DROP_PHRASES.get(code, ()))
+    if is_folder_model(key):  # VI_MODEL=models/vi-ince-ayar-2026-11 gibi
+        ref = folder_ref(key)
+        return LanguageProfile(code=code, asr_model=ref, asr=AsrParams(**params), segmentation="full")
     if key not in MODEL_CHOICES.get(code, []):
-        raise ValueError(f"'{key}' modeli '{code}' dili için tanımlı değil: {MODEL_CHOICES.get(code)}")
+        raise ValueError(f"'{key}' modeli '{code}' dili için tanımlı değil: {MODEL_CHOICES.get(code)} "
+                         "(ya da model klasörünün yolunu verin)")
     ref = model_ref(key, models_dir)
     # Whisper sessizlik/müzikte metin uyduruyor: ona yalnızca VAD parçaları
     seg = "vad" if ref.kind in ("whisper", "faster-whisper") else "full"

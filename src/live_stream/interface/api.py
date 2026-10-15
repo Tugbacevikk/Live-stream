@@ -1,8 +1,7 @@
 """HTTP API (FastAPI).
 
     POST /jobs          ses dosyası yükle -> 202 + job_id (iş kuyruğa girer)
-                        form alanları: file (zorunlu), language (tr | auto, varsayılan auto;
-                        tek dil varken ikisi aynı),
+                        form alanları: file (zorunlu), language (tr | vi | auto, varsayılan auto),
                         callback_url (isteğe bağlı: iş bitince buraya POST edilir),
                         num_speakers (isteğe bağlı: biliniyorsa konuşmacı sayısı; yoksa sesten bulunur)
                         external_id (isteğe bağlı: çağıran sistemin kendi kimliği; aynısı tekrar
@@ -84,7 +83,7 @@ def create_app(store: JobStore, queue: JobQueue, settings: Settings,
                health_checks: dict | None = None, queue_stats=None, rate_limiter=None,
                readiness: dict | None = None) -> FastAPI:
     """readiness: ad -> () -> (hazır mı, açıklama); /health/ready bunları da sorar."""
-    api = FastAPI(title="Ses -> metin + konuşmacı (Türkçe) + canlı altyazı", version="0.4.0")
+    api = FastAPI(title="Ses -> metin + konuşmacı (tr, vi) + canlı altyazı", version="0.4.0")
     auth = Depends(api_key_dependency(settings))
     submit = SubmitJob(store, queue, settings.languages)
     data_dir = Path(settings.data_dir)

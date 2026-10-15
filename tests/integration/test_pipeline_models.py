@@ -1,6 +1,6 @@
-"""Gerçek modellerle uçtan uca testler (Türkçe). Gereken model yoksa test atlanır.
+"""Gerçek modellerle uçtan uca testler (Türkçe, Vietnamca). Gereken model yoksa test atlanır.
 
-    python scripts/download_models.py                      # faster-whisper-medium + yardımcılar
+    python scripts/download_models.py                      # faster-whisper-medium + Zipformer + yardımcılar
     python scripts/download_models.py --tr all             # tüm Türkçe adaylar
     pytest -m models
     MODELS_DIR=D:/modeller pytest -m models                # modeller başka klasördeyse
@@ -13,6 +13,9 @@ import pytest
 
 M = Path(os.environ.get("MODELS_DIR") or Path(__file__).resolve().parents[2] / "models")
 LIDW = M / "spoken-language-identification-test-wavs"
+Z68 = M / "sherpa-onnx-zipformer-vi-int8-2025-04-20"
+TINY = M / "sherpa-onnx-whisper-tiny"
+SMALL = M / "sherpa-onnx-whisper-small"
 TURBO = M / "sherpa-onnx-whisper-turbo"
 OMNI = M / "sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12"
 VAD = M / "silero_vad.onnx"
@@ -27,12 +30,20 @@ def need(*paths):
 
 
 pytestmark = pytest.mark.models
+VI_OK = need(Z68 / "tokens.txt", M / "silero_vad.onnx")
+LID_OK = need(TINY / "tiny-encoder.int8.onnx", SMALL / "small-encoder.int8.onnx",
+              LIDW / "tr-turkish.wav", Z68 / "test_wavs")
+DIAR = [M / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"]
 
 
 def load(p):
     from live_stream.infrastructure.audio import SoundfileLoader
 
     return SoundfileLoader().load(str(p))
+
+
+def vi_wavs():
+    return [load(Z68 / "test_wavs" / f"{i}.wav") for i in range(3)]
 
 
 def tr_asr_model():
@@ -128,11 +139,96 @@ def test_uctan_uca_toplu_is(tmp_path):
     p = tmp_path / "konusma.wav"
     sf.write(p, np.concatenate([tr, gap, tr, gap, tr]), 16000)
 
-    uc = build(default_config(M, models={"tr": TR_MODEL}, device="cpu"), MemoryRepo())
-    t = uc.run(AudioJob("e2e", str(p)))  # dil verilmedi: tek dil, tespit yok
+    uc = build(default_config(M, ("tr",), models={"tr": TR_MODEL}, device="cpu"), MemoryRepo())
+    t = uc.run(AudioJob("e2e", str(p)))  # dil verilmedi, yalnızca Türkçe açık: tespit yok
     assert t.language.code == "tr" and t.language.source == LanguageSource.DEFAULT
     assert t.text.count("yapabilirsin") == 3
     assert {u.speaker for u in t.utterances} == {"speaker_00"}  # aynı kişi üç kez
+
+
+@VI_OK
+def test_vad_ofseti_ve_asr_zamanlari():
+    from live_stream.application.config import VadConfig
+    from live_stream.infrastructure.catalog import language_profile
+    from live_stream.infrastructure.normalizer import ViNormalizer
+    from live_stream.infrastructure.sherpa_asr import build_asr
+    from live_stream.infrastructure.sherpa_vad import SileroVad
+
+    audio = np.concatenate([np.zeros(16000 * 3, dtype=np.float32), vi_wavs()[0]])
+    segs = SileroVad(VadConfig(model=str(M / "silero_vad.onnx"))).split(audio)
+    assert segs and 2.5 < segs[0].start < 3.6
+
+    words = build_asr(language_profile("vi", M), ViNormalizer()).transcribe(segs)
+    assert len(words) > 3
+    assert words[0].start >= 2.5  # ofset eklenmiş olmalı
+    assert all(a.start <= b.start for a, b in zip(words, words[1:]))
+    assert all(w.text == w.text.lower() for w in words)
+
+
+@VI_OK
+def test_hotword_bpe_vocab_olmadan_hata_verir(tmp_path):
+    from dataclasses import replace
+
+    from live_stream.infrastructure.catalog import language_profile
+    from live_stream.infrastructure.normalizer import ViNormalizer
+    from live_stream.infrastructure.sherpa_asr import build_asr
+
+    hw = tmp_path / "h.txt"
+    hw.write_text("BÁC SĨ\n", encoding="utf-8")
+    prof = language_profile("vi", M, hotwords_file=str(hw))
+    files = {**prof.asr_model.files, "bpe_vocab": "yok.vocab"}
+    prof = replace(prof, asr_model=replace(prof.asr_model, files=files))
+    with pytest.raises(FileNotFoundError):
+        build_asr(prof, ViNormalizer())
+
+
+@LID_OK
+def test_dil_tespiti_gercek_seslerde():
+    from live_stream.application.config import LidConfig
+    from live_stream.application.language import LanguageResolver
+    from live_stream.domain import UnsupportedLanguageError, VadSegment
+    from live_stream.infrastructure.catalog import lid_stages
+    from live_stream.infrastructure.whisper_lid import WhisperLanguageDetector
+
+    tiny, small = (WhisperLanguageDetector(e, d) for e, d in lid_stages(M))
+    p = tiny.probabilities(load(LIDW / "tr-turkish.wav"))
+    assert abs(sum(p.values()) - 1) < 1e-6 and len(p) == 99
+
+    # 2.wav yalnızca 1,6 sn: tiny tek başına reddediyor, kademe small'a devredip doğru buluyor
+    with pytest.raises(UnsupportedLanguageError):
+        LanguageResolver(["vi", "tr"], [tiny]).resolve(None, [VadSegment(0.0, vi_wavs()[2])])
+
+    res = LanguageResolver(["vi", "tr"], [tiny, small], LidConfig())
+    seg = lambda a: [VadSegment(0.0, a)]  # noqa: E731
+    assert res.resolve(None, seg(load(LIDW / "tr-turkish.wav"))).code == "tr"
+    for a in vi_wavs():
+        assert res.resolve(None, seg(a)).code == "vi"
+    for f in ("en-english.wav", "de-german.wav", "zh-chinese.wav"):
+        with pytest.raises(UnsupportedLanguageError):
+            res.resolve(None, seg(load(LIDW / f)))
+
+
+@VI_OK
+@LID_OK
+@need(*DIAR)
+def test_uctan_uca_dil_tespitli(tmp_path):
+    import soundfile as sf
+
+    from live_stream.domain import AudioJob, LanguageSource
+    from live_stream.interface.cli import MemoryRepo, build, default_config
+
+    w = vi_wavs()
+    gap = np.zeros(8000, dtype=np.float32)
+    p = tmp_path / "konusma.wav"
+    sf.write(p, np.concatenate([w[0], gap, w[1], gap, w[2], gap, w[0]]), 16000)
+
+    uc = build(default_config(M), MemoryRepo())
+    t = uc.run(AudioJob("e2e", str(p)))
+    assert t.language.code == "vi" and t.language.source == LanguageSource.DETECTED
+    assert t.utterances and len(t.text.split()) > 10
+    # 0.wav, 1.wav, 2.wav üç farklı kişi (3D-Speaker uzaklığı 0,84-1,07); sıra 0,1,2,0
+    assert [u.speaker for u in t.utterances] == ["speaker_00", "speaker_01", "speaker_02", "speaker_00"]
+    assert uc.engines.loaded() == ["vi"]  # Türkçe model yüklenmedi
 
 
 @need(CAMPP, TR_WAV, LIDW / "en-english.wav", VAD)
@@ -191,6 +287,7 @@ def test_canli_oturum_gercek_modelle_ve_kayit_toplu_ise(tmp_path, monkeypatch):
     monkeypatch.setenv("CONCURRENCY", "1")
     s = Settings(models_dir=str(M), data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"),
                  languages=["tr"], tr_model=TR_MODEL, whisper_device="cpu", verify_models=False)
+    # (Türkçe; iki dilli canlı oturum aşağıda)
     app, store, queue, _ = build_local(s, workers=1)
     tr = load(TR_WAV)
     sil = np.zeros(16000, dtype=np.float32)
@@ -215,5 +312,55 @@ def test_canli_oturum_gercek_modelle_ve_kayit_toplu_ise(tmp_path, monkeypatch):
             time.sleep(0.1)
         assert rec.status == JobStatus.DONE, rec.error
         assert store.get_transcript(job_id).text.count("yapabilirsin") == 2
+    finally:
+        queue.shutdown(wait=False)
+
+
+@VI_OK
+@LID_OK
+@need(*DIAR)
+@HAS_TR
+@pytest.mark.parametrize("secim", ["vi", "auto"])
+def test_canli_vietnamca_ve_otomatik_dil(tmp_path, monkeypatch, secim):
+    """İki dil açık: Vietnamca seçilince Zipformer; 'auto' seçilince ilk cümleden Vietnamca bulunur.
+    Oturum kaydı Vietnamca toplu işe gider ve konuşmacı ayrımlı sonuç çıkar."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from live_stream.domain import JobStatus
+    from live_stream.interface.local_server import build_local
+    from live_stream.interface.settings import Settings
+
+    monkeypatch.setenv("CONCURRENCY", "1")
+    s = Settings(models_dir=str(M), data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"),
+                 languages=["tr", "vi"], tr_model=TR_MODEL, whisper_device="cpu", verify_models=False)
+    app, store, queue, _ = build_local(s, workers=1)
+    w = vi_wavs()
+    sil = np.zeros(16000, dtype=np.float32)
+    pcm = (np.concatenate([sil, w[0], sil, w[1], sil]) * 32767).astype("<i2").tobytes()
+    try:
+        with TestClient(app) as c, c.websocket_connect(f"/ws/live?language={secim}&partial_sec=0") as ws:
+            ready = ws.receive_json()
+            assert ready["type"] == "ready" and ready["language"] == secim
+            for i in range(0, len(pcm), 3200):
+                ws.send_bytes(pcm[i:i + 3200])
+            ws.send_text('{"type": "stop"}')
+            msgs = []
+            while (m := ws.receive_json())["type"] != "done":
+                msgs.append(m)
+        finals = [x["text"] for x in msgs if x["type"] == "final"]
+        assert len(finals) == 2 and all(len(f.split()) > 3 and f == f.lower() for f in finals)
+        langs = [x for x in msgs if x["type"] == "language"]
+        assert langs == ([] if secim == "vi" else [langs[0]]) and all(x["code"] == "vi" for x in langs)
+        for _ in range(600):
+            rec = store.get(m["job_id"])
+            if rec.status in (JobStatus.DONE, JobStatus.FAILED):
+                break
+            time.sleep(0.1)
+        assert rec.status == JobStatus.DONE, rec.error
+        t = store.get_transcript(m["job_id"])
+        assert t.language.code == "vi" and t.model == "zipformer-68m"
+        assert len({u.speaker for u in t.utterances}) == 2  # 0.wav ve 1.wav iki farklı kişi
     finally:
         queue.shutdown(wait=False)

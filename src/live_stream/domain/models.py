@@ -1,7 +1,8 @@
 """Çekirdek veri tipleri. Hiçbir dış kütüphaneye bağlı değildir.
 
 Zaman birimi her yerde saniyedir (float), ses dosyasının başından itibaren.
-Metin birimi Word'dür: boşlukla ayrılan her parça (Türkçede bir kelime).
+Metin birimi Word'dür: boşlukla ayrılan her parça. Vietnamcada bu bir hecedir
+(Vietnamca yazımda her hece ayrı yazılır), Türkçede bir kelimedir.
 """
 from __future__ import annotations
 
@@ -75,7 +76,7 @@ class VadSegment:
 
 @dataclass(frozen=True)
 class Word:
-    """ASR çıktısındaki tek birim (kelime), mutlak zamanlarla."""
+    """ASR çıktısındaki tek birim (Vietnamcada hece, Türkçede kelime), mutlak zamanlarla."""
 
     text: str
     start: float

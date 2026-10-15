@@ -197,3 +197,37 @@ class LiveSession:
             self.recorder.close()
             return self.recorder.audio_path
         return None
+
+
+class LanguageLock:
+    """Canlı oturumun dili. Seçildiyse baştan bellidir; 'auto' ise ilk yeterince uzun cümleden
+    bulunur ve oturum boyunca kilitlenir (konferansta dil değişmez; her cümlede tespit hem
+    gecikme ekler hem de kısa cümlelerde yanılır).
+
+    detect(ses) -> LanguageDecision; desteklenmeyen dil ya da hata olursa fallback kullanılır."""
+
+    def __init__(self, language: str | None, detect: Callable[[np.ndarray], object] | None,
+                 fallback: str, min_sec: float = 1.5):
+        self.code: str | None = language
+        self.confidence: float | None = 1.0 if language else None
+        self.detected = False
+        self._detect, self.fallback, self.min_sec = detect, fallback, min_sec
+
+    @property
+    def locked(self) -> bool:
+        return self.code is not None
+
+    def decide(self, audio: np.ndarray, final: bool) -> str | None:
+        """Dil belliyse onu döner. Değilse: ses yeterince uzunsa (ya da kesin cümleyse) tespit
+        edip kilitler; kısa ara metinde None (henüz karar yok, ara metin gösterilmez)."""
+        if self.code is not None:
+            return self.code
+        if not final and len(audio) < self.min_sec * SAMPLE_RATE:
+            return None
+        try:
+            d = self._detect(audio) if self._detect else None
+            self.code, self.confidence = (d.code, d.confidence) if d else (self.fallback, None)
+        except Exception:  # desteklenmeyen dil (UnsupportedLanguageError) ya da model hatası
+            self.code, self.confidence = self.fallback, None
+        self.detected = True
+        return self.code

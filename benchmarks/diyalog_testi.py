@@ -2,9 +2,9 @@
 
     python benchmarks/diyalog_testi.py veri/test/diyalog/diyalog.tsv
     python benchmarks/diyalog_testi.py diyalog.tsv --kisi-sayisi-ver     # num_speakers istekte
-    python benchmarks/diyalog_testi.py diyalog.tsv --dil tr
+    python benchmarks/diyalog_testi.py diyalog.tsv --dil vi               # tespit atlanır
 
-Girdi: TSV (dosya, rttm, ref sütunları); veri seti onay kuyruğundan (scripts/veri_seti.py) ya da elle.
+Girdi: scripts/vietmed_hazirla.py çıktısı (dosya, rttm, ref sütunları).
 Ölçülenler (kullanıcının gördüğü son çıktı üzerinden, yani birleştirilmiş satırlardan):
   DER (collar 0,25 sn; kaçırılan / yanlış alarm / karışan), cpWER, hece WER,
   konuşmacı sayısı doğru mu, gecikme oranı (işlem süresi / ses süresi; hedef <= 1).
@@ -40,7 +40,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("tsv")
     p.add_argument("--models-dir", default="models")
-    p.add_argument("--dil", default=None, help="tr")
+    p.add_argument("--dil", default=None, help="vi / tr; verilmezse sesten tespit")
     p.add_argument("--kisi-sayisi-ver", action="store_true", help="doğru kişi sayısını istekte ver")
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--limit", type=int, default=0)

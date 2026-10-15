@@ -38,9 +38,10 @@ class Settings:
     redis_url: str = field(default_factory=lambda: os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
     models_dir: str = field(default_factory=lambda: os.environ.get("MODELS_DIR", "models"))
     data_dir: str = field(default_factory=lambda: os.environ.get("DATA_DIR", "data/uploads"))
-    # Şimdilik yalnızca Türkçe. Yeni dil = catalog.py'de model + normalizer.py'de biçim.
-    languages: list[str] = field(default_factory=lambda: _list(os.environ.get("LANGUAGES", "tr")))
+    # Türkçe ve Vietnamca. Yalnızca biri istenirse LANGUAGES=tr (dil tespiti modeli yüklenmez).
+    languages: list[str] = field(default_factory=lambda: _list(os.environ.get("LANGUAGES", "tr,vi")))
     tr_model: str | None = field(default_factory=lambda: os.environ.get("TR_MODEL") or None)
+    vi_model: str | None = field(default_factory=lambda: os.environ.get("VI_MODEL") or None)
     # faster-whisper nerede çalışsın: auto (GPU varsa GPU, yoksa/açılamazsa CPU) | cuda | cpu.
     # Sunucu (4000 mesaj, yalnızca CPU) için cpu; kendi bilgisayarında canlı altyazı için auto.
     whisper_device: str = field(default_factory=lambda: os.environ.get("WHISPER_DEVICE", "auto").lower())
@@ -53,6 +54,8 @@ class Settings:
     diarizer: str = field(default_factory=lambda: os.environ.get("DIARIZER", "cluster"))
     # Whisper'a ipucu olarak verilen özel terimler, boşlukla ayrılmış (ör. "YOLOv8 TÜBİTAK")
     hotwords: str | None = field(default_factory=lambda: os.environ.get("HOTWORDS") or None)
+    # Vietnamca terim dosyası (Zipformer): satır başına bir terim, BÜYÜK HARF (hotwords/tibbi_vi.txt)
+    vi_hotwords: str | None = field(default_factory=lambda: os.environ.get("VI_HOTWORDS") or None)
     task_time_limit: int = field(default_factory=lambda: int(os.environ.get("TASK_TIME_LIMIT", "1800")))
     max_audio_minutes: float = field(default_factory=lambda: float(os.environ.get("MAX_AUDIO_MINUTES", "60")))
     max_upload_mb: int = field(default_factory=lambda: int(os.environ.get("MAX_UPLOAD_MB", "100")))
@@ -61,6 +64,8 @@ class Settings:
         "ALLOW_LOCAL_PATHS", "0") == "1")
     # worker açılırken önceden yüklenecek diller (ilk işte gecikme olmasın)
     warmup: list[str] = field(default_factory=lambda: _list(os.environ.get("WARMUP_LANGS", "")))
+    # dil tespiti worker'ı: Whisper-small'ı da baştan yükle (yoksa ilk zor seste ~5-15 sn gecikme)
+    warmup_lid: bool = field(default_factory=lambda: os.environ.get("WARMUP_LID", "0") == "1")
 
     # saklama: biten işlerin ses dosyası N saat, iş kaydı ve sonucu N gün sonra silinir (0 = silme)
     audio_retention_hours: int = field(default_factory=lambda: int(os.environ.get(
@@ -104,8 +109,10 @@ class Settings:
     verify_models: bool = field(default_factory=lambda: os.environ.get("VERIFY_MODELS", "1") == "1")
 
     # --- Canlı altyazı (/canli, ws://.../ws/live) ---
+    # Canlı sayfanın varsayılan dili: tr | vi | auto (auto: ilk cümleden bulunur ve kilitlenir)
+    live_language: str = field(default_factory=lambda: os.environ.get("LIVE_LANGUAGE", "tr").lower())
     # Canlı modun Türkçe modeli; boşsa TR_MODEL ile aynı (model bir kez yüklenir).
-    # 4 GB GPU'da medium yetişmezse LIVE_MODEL=faster-whisper-small.
+    # 4 GB GPU'da medium yetişmezse LIVE_MODEL=faster-whisper-small. Vietnamca: hep VI_MODEL.
     live_model: str | None = field(default_factory=lambda: os.environ.get("LIVE_MODEL") or None)
     live_vad: str = field(default_factory=lambda: os.environ.get("LIVE_VAD", "silero").lower())
     live_vad_threshold: float = field(default_factory=lambda: float(os.environ.get(
@@ -145,7 +152,7 @@ class Settings:
         belleğin küçüğü.
 
         queue=None: yerel mod — tek süreç, modeller bir kez yüklenir, işler paylaşır.
-        queue='tr': tam mod — her süreç kendi modelini yükler (stream_worker --surec).
+        queue='vi'|'tr': tam mod — her süreç kendi modelini yükler (stream_worker --surec).
         Bellek: toplam belleğin %75'i (işletim sistemi ve diğer programlara pay bırakılır).
         """
         from live_stream.infrastructure.catalog import AUX_MEMORY_GB, memory_estimate
@@ -173,7 +180,7 @@ class Settings:
 
     @property
     def models(self) -> dict[str, str]:
-        return {"tr": self.tr_model} if self.tr_model else {}
+        return {k: v for k, v in (("vi", self.vi_model), ("tr", self.tr_model)) if v}
 
 
 def total_memory_gb() -> float | None:

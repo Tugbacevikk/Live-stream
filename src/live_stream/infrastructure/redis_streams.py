@@ -1,7 +1,7 @@
 """Redis Streams kuyruğu (Celery yerine; Windows'ta da çalışır).
 
 Desen (fine-tuning reposundaki RedisStreamAdapter'dan uyarlandı):
-  - her kuyruk bir akış (stream): asr:tr (ikinci dil eklenince asr:lid ve asr:<dil>)
+  - her kuyruk bir akış (stream): asr:lid, asr:vi, asr:tr
   - worker'lar bir tüketici grubunda (consumer group) mesaj paylaşır (XREADGROUP)
   - iş bitince XACK; bitmeden süreç ölürse mesaj "bekleyen" listesinde kalır ve
     claim_idle süresinden sonra başka bir worker XAUTOCLAIM ile devralır
@@ -32,7 +32,7 @@ def presence_key(queue: str, consumer: str) -> str:
 
 
 def stream_name(queue: str) -> str:
-    """queue: 'lid' ya da dil kodu ('tr')."""
+    """queue: 'lid' ya da dil kodu ('vi', 'tr')."""
     return f"asr:{queue}"
 
 

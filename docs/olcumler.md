@@ -2,7 +2,7 @@
 
 > 15 Ekim 2026'dan önceki ölçümler Vietnamese-speech-to-text-models reposunda yapıldı.
 > Konuşmacı ayırma ayarları (CAM++, eşik 0,70) Vietnamca seslerle seçildi; Türkçe doğru
-> metinli ölçüm henüz yok (yol haritası, Faz 4).
+> metinli ölçüm henüz yok.
 
 Her sayı bir betikten gelir; betik adı ve veri yanında yazılıdır. Donanım: 2 çekirdekli
 sanal makine (Xeon), ONNX_THREADS=2, yalnızca CPU.

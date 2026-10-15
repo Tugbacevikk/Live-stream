@@ -66,10 +66,17 @@ class WhisperParams:
 @dataclass(frozen=True)
 class AsrParams:
     num_threads: int = 2
-    max_word_duration: float = 1.0  # tek kelime en fazla bu kadar sürebilir (sn; Omnilingual)
-    # sherpa-onnx modelleri (Omnilingual): parçalar en fazla bu kadar toplam sesten oluşan
-    # gruplar halinde çözülür; hepsini birden çözmek belleği patlatıyor (Vietnamca projesinde
-    # 77 dk'lık testte 6 GB). 10 sn: ~460 MB.
+    decoding_method: str = "modified_beam_search"  # yalnızca zipformer
+    hotwords_file: str | None = None  # yalnızca zipformer; terimler BÜYÜK HARFLE
+    hotwords_score: float = 1.5
+    # beam genişliği (modified_beam_search). Hotword çok parçalı terimlerde ancak geniş
+    # beam ile etkili: "XƠ VỮA" (V+Ữ+A) 4 yol/skor 3'te 0/5, 10 yol/skor 5'te 5/5 (13 Ekim).
+    max_active_paths: int = 4
+    max_word_duration: float = 1.0  # tek kelime/hece en fazla bu kadar sürebilir (sn)
+    # Parçalar en fazla bu kadar toplam sesten oluşan gruplar halinde birlikte çözülür.
+    # Hepsini birden çözmek belleği patlatıyor: 92 sn'lik seste 27 parça -> 1,7 GB,
+    # 77 dk'lık testte 6 GB'ta süreç öldürüldü. Ölçüm (12 Ekim, Zipformer-68M):
+    #   10 sn: 460 MB, RTF 0,029 | 30 sn: 1,2 GB, RTF 0,032 | 60 sn: 2,2 GB, RTF 0,043
     batch_seconds: float = 10.0
     # Whisper sessizlik/gürültüde bu cümleleri uyduruyor; parça yalnızca bundan ibaretse atılır
     drop_phrases: tuple[str, ...] = ()
@@ -78,17 +85,18 @@ class AsrParams:
 
 @dataclass(frozen=True)
 class LanguageProfile:
-    code: str  # ISO 639-1: "tr"
+    code: str  # ISO 639-1: "vi", "tr"
     asr_model: ModelRef
     asr: AsrParams = field(default_factory=AsrParams)
-    # "full": sesin tamamı en sessiz anlardan bölünerek ASR'a verilir (Omnilingual).
+    # "full": sesin tamamı en sessiz anlardan bölünerek ASR'a verilir (Zipformer, Omnilingual).
     # "vad": yalnızca VAD'ın konuşma dediği parçalar (Whisper: sessizlikte metin uyduruyor).
     segmentation: str = "full"
 
 
 @dataclass(frozen=True)
 class ChunkConfig:
-    """'full' bölme (Omnilingual): parça en fazla max_len sn, kesim en sessiz ana."""
+    """'full' bölme: parça en fazla max_len sn, kesim en sessiz ana.
+    VietMed 50 dosya, Zipformer-68M: 10 sn %10,2 | 15 sn %10,1 | 20 sn %10,0 WER."""
 
     max_len: float = 15.0
     min_len: float = 5.0
@@ -195,7 +203,7 @@ class FusionConfig:
     # girme ("ừ", "evet", "hı hı") yok; düzeltme tam da onları siler ve bu sette ölçülemez.
     # Gerçek, kesintisiz görüşme kaydıyla ölçülünce açılabilir (FUSION_SANDWICH_MAX).
     sandwich_max: float = 0.0
-    # kelime güveni bunun altındaysa satırda işaretlenir (Omnilingual: parça olasılıkları,
+    # kelime güveni bunun altındaysa satırda işaretlenir (Zipformer: parça olasılıkları,
     # faster-whisper: kelime olasılığı); düzeltme yapan kişi önce bunlara bakar
     low_conf: float = 0.5
 
@@ -207,7 +215,7 @@ class ProfileConfig:
     full: her adım çalışır (varsayılan).
     feedback: kısa ve çok sayıda gelen geri bildirim mesajları için. Ses min_diarize_sec'ten
       kısaysa konuşmacı ayırma atlanır (tek kişi kabul edilir); Whisper beam 1 (açgözlü çözme).
-      Omnilingual zaten hızlı olduğu için onda değişen bir şey yok.
+      Zipformer/Omnilingual zaten hızlı olduğu için onlarda değişen bir şey yok.
     Projede ayrıca SNR düşükse gürültü giderme (DeepFilterNet) vardı: PyTorch ister ve
     internetsiz CPU kurulumuna uymaz; alınmadı (ADR 0006).
     """
@@ -221,7 +229,7 @@ class SafetyNetConfig:
     """Yazıya dökülmemiş konuşma (fine-tuning projesindeki güvenlik ağı + kapsama ölçüsü).
 
     VAD'ın konuşma dediği ama hiç kelime çıkmayan, min_gap'ten uzun aralıklar bulunur;
-    motor destekliyorsa (Whisper) kenar payıyla yeniden çözülür. Omnilingual'e zaten
+    motor destekliyorsa (Whisper) kenar payıyla yeniden çözülür. Zipformer/Omnilingual'e zaten
     sesin tamamı verildiği için onlarda yalnızca kapsama ölçülür.
     """
 

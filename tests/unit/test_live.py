@@ -11,7 +11,9 @@ import soundfile as sf
 from fastapi.testclient import TestClient
 
 from live_stream.application.config import AsrParams, ModelRef, WhisperParams
-from live_stream.application.live import FinalJob, LiveSession, PartialJob, Segmenter, SegmenterConfig
+from live_stream.application.live import (
+    FinalJob, LanguageLock, LiveSession, PartialJob, Segmenter, SegmenterConfig,
+)
 from live_stream.infrastructure.catalog import DROP_PHRASES
 from live_stream.infrastructure.faster_whisper_asr import FasterWhisperAsr, device_candidates
 from live_stream.infrastructure.live_vad import EnergyDetector, make_detector
@@ -160,29 +162,81 @@ def test_cihaz_sirasi():
         device_candidates("tpu", "auto")
 
 
+# ------------------------------------------------------------------- oturum dili
+class Decision:
+    def __init__(self, code, confidence=0.9):
+        self.code, self.confidence = code, confidence
+
+
+def test_dil_secildiyse_tespit_yapilmaz():
+    calls = []
+    lock = LanguageLock("vi", lambda a: calls.append(1), fallback="tr")
+    assert lock.decide(tone(0.5), final=False) == "vi" and not lock.detected and calls == []
+
+
+def test_otomatik_dil_ilk_uzun_cumleden_bulunur_ve_kilitlenir():
+    calls = []
+
+    def detect(audio):
+        calls.append(len(audio))
+        return Decision("vi", 0.97)
+
+    lock = LanguageLock(None, detect, fallback="tr", min_sec=1.5)
+    assert lock.decide(tone(0.8), final=False) is None       # kısa ara metin: henüz karar yok
+    assert lock.decide(tone(2.0), final=False) == "vi"       # yeterince uzun: tespit
+    assert lock.decide(tone(3.0), final=True) == "vi"        # kilitli: tekrar tespit yok
+    assert len(calls) == 1 and lock.detected and lock.confidence == 0.97
+
+
+def test_otomatik_dil_tespit_edilemezse_varsayilan():
+    def boom(audio):
+        raise RuntimeError("desteklenmeyen dil")
+
+    lock = LanguageLock(None, boom, fallback="tr")
+    assert lock.decide(tone(0.5), final=True) == "tr" and lock.confidence is None
+
+
 # ------------------------------------------------------------------- uçtan uca WebSocket
 class FakeLiveAsr:
-    device = "cpu"
+    def __init__(self, tag=""):
+        self.tag = tag
+        self.device = "cpu"
 
     def transcribe_text(self, audio, fast=False, prompt=None, normalizer=None):
-        return "ara metin" if fast else f"cümle {len(audio) // SR}"
+        return "ara metin" if fast else f"{self.tag}cümle {len(audio) // SR}"
+
+
+def fake_engines():
+    from live_stream.interface.live_server import LiveEngine
+
+    return {"tr": LiveEngine(lambda: FakeLiveAsr(), "sahte-tr"),
+            "vi": LiveEngine(lambda: FakeLiveAsr("vi:"), "sahte-vi")}
+
+
+def make_local(tmp_path, monkeypatch, languages=("tr", "vi"), engines=None, detect=None):
+    """Yerel sunucu (toplu iş + canlı altyazı), modeller yerine sahte nesnelerle."""
+    from live_stream.interface import local_server
+    from live_stream.interface.settings import Settings
+
+    from live_stream.application.language import LanguageResolver
+
+    monkeypatch.setattr(local_server, "build_pipeline", lambda cfg, store, **kw: NS(engines={}))
+    # dil tespiti modeli (Whisper-tiny) yerine boş: canlı tespit testte 'detect' ile verilir
+    monkeypatch.setattr(local_server, "build_resolver", lambda cfg: LanguageResolver(list(cfg.languages), []))
+    s = Settings(data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"),
+                 languages=list(languages), live_language="tr")
+    engines = engines or {k: v for k, v in fake_engines().items() if k in languages}
+    app, store, queue, _ = local_server.build_local(s, workers=1, warm_up=False, live_engines=engines,
+                                                    live_detector=EnergyDetector, live_detect=detect)
+    sent = []
+    queue.enqueue_transcription = lambda job_id, lang: sent.append((job_id, lang))
+    queue.enqueue_detection = lambda job_id: sent.append((job_id, "lid"))
+    return app, store, sent
 
 
 @pytest.fixture
 def local(tmp_path, monkeypatch):
-    """Yerel sunucu (toplu iş + canlı altyazı), modeller yerine sahte nesnelerle."""
-    from live_stream.interface import local_server
-    from live_stream.interface.live_server import LiveEngine
-    from live_stream.interface.settings import Settings
-
-    monkeypatch.setattr(local_server, "build_pipeline", lambda cfg, store, **kw: NS(engines={}))
-    s = Settings(data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"), languages=["tr"])
-    engine = LiveEngine(lambda: FakeLiveAsr(), "sahte")
-    app, store, queue, _ = local_server.build_local(s, workers=1, warm_up=False, live_engine=engine,
-                                                    live_detector=EnergyDetector)
-    sent = []
-    queue.enqueue_transcription = lambda job_id, lang: sent.append((job_id, lang))
-    return app, store, sent, tmp_path
+    return (*make_local(tmp_path, monkeypatch), tmp_path)
 
 
 def speak(ws, audio):
@@ -191,68 +245,109 @@ def speak(ws, audio):
         ws.send_bytes(pcm[i:i + 3200])
 
 
+def session(client, url, audio):
+    with client.websocket_connect(url) as ws:
+        ready = ws.receive_json()
+        speak(ws, audio)
+        ws.send_text('{"type": "stop"}')
+        msgs = []
+        while (m := ws.receive_json())["type"] != "done":
+            msgs.append(m)
+    return ready, msgs, m
+
+
+TWO = np.concatenate([silence(0.3), tone(1.5), silence(1.0), tone(2.5), silence(0.2)])
+
+
 def test_canli_oturum_uctan_uca_ve_toplu_ise_gonderilir(local):
     app, store, sent, tmp = local
-    audio = np.concatenate([silence(0.3), tone(1.5), silence(1.0), tone(2.5), silence(0.2)])
     with TestClient(app) as client:
         assert "Canlı Altyazı" in client.get("/canli").text
         assert "/canli" in client.get("/").text                     # ana sayfadan bağlantı
-        with client.websocket_connect("/ws/live?partial_sec=0.8") as ws:
-            ready = ws.receive_json()
-            assert ready["type"] == "ready" and ready["recording"] and ready["model"] == "sahte"
-            speak(ws, audio)
-            ws.send_text('{"type": "stop"}')
-            msgs = []
-            while (m := ws.receive_json())["type"] != "done":
-                msgs.append(m)
-        done = m
-        assert client.get("/live/health").json()["ready"] is True
+        ready, msgs, done = session(client, "/ws/live?partial_sec=0.8", TWO)
+        h = client.get("/live/health").json()
 
+    assert ready["type"] == "ready" and ready["recording"] and ready["model"] == "sahte-tr"
+    assert [x["code"] for x in h["languages"]] == ["tr", "vi"] and h["default"] == "tr"
+    assert h["auto"] is False                         # dil tespiti verilmedi: otomatik seçenek yok
     finals = [m for m in msgs if m["type"] == "final"]
     assert [m["id"] for m in finals] == [0, 1]        # ikinci cümle "stop" ile kesinleşti
+    assert not any(m["type"] == "language" for m in msgs)  # dil seçildi: duyuru yok
     assert any(m["type"] == "stats" for m in msgs)
     wavs = list((tmp / "rec").glob("*.wav"))
     assert len(wavs) == 1
-    # oturum kaydı konuşmacı ayrımı için toplu işe gitti
+    # oturum kaydı konuşmacı ayrımı için oturumun diliyle toplu işe gitti
     assert done["job_id"] and sent == [(done["job_id"], "tr")]
     rec = store.get(done["job_id"])
     assert rec.job.audio_path == str(wavs[0].resolve()) and rec.job.language == "tr"
 
 
+def test_vietnamca_secilince_vietnamca_model(local):
+    app, store, sent, _ = local
+    with TestClient(app) as client:
+        ready, msgs, done = session(client, "/ws/live?language=vi&partial_sec=0", TWO)
+    assert ready["language"] == "vi" and ready["model"] == "sahte-vi"
+    assert all(m["text"].startswith("vi:") for m in msgs if m["type"] == "final")
+    assert sent == [(done["job_id"], "vi")] and store.get(done["job_id"]).job.language == "vi"
+
+
+def test_otomatik_dil_ilk_cumleden_bulunur(tmp_path, monkeypatch):
+    calls = []
+
+    def detect(audio):
+        calls.append(len(audio))
+        return Decision("vi", 0.93)
+
+    app, store, sent = make_local(tmp_path, monkeypatch, detect=detect)
+    with TestClient(app) as client:
+        assert client.get("/live/health").json()["auto"] is True
+        ready, msgs, done = session(client, "/ws/live?language=auto&partial_sec=0", TWO)
+    assert ready["language"] == "auto" and ready["model"] is None
+    lang = [m for m in msgs if m["type"] == "language"]
+    assert lang == [{"type": "language", "code": "vi", "confidence": 0.93, "model": "sahte-vi", "device": "cpu"}]
+    assert msgs.index(lang[0]) < next(i for i, m in enumerate(msgs) if m["type"] == "final")
+    assert [m["text"][:3] for m in msgs if m["type"] == "final"] == ["vi:", "vi:"]
+    assert len(calls) == 1                                   # oturumda bir kez
+    assert sent == [(done["job_id"], "vi")]
+
+
+def test_tek_dil_acikken_otomatik_o_dildir(tmp_path, monkeypatch):
+    app, _, sent = make_local(tmp_path, monkeypatch, languages=("tr",))
+    with TestClient(app) as client:
+        assert client.get("/live/health").json()["auto"] is False
+        ready, _, done = session(client, "/ws/live?language=auto", TWO)
+    assert ready["language"] == "tr" and sent == [(done["job_id"], "tr")]
+
+
+def test_acik_olmayan_dil_reddedilir(tmp_path, monkeypatch):
+    app, *_ = make_local(tmp_path, monkeypatch, languages=("tr",))
+    with TestClient(app) as client, client.websocket_connect("/ws/live?language=vi") as ws:
+        m = ws.receive_json()
+    assert m["type"] == "error" and "vi" in m["message"]
+
+
 def test_analiz_istenmezse_toplu_is_acilmaz(local):
     app, _, sent, _ = local
-    with TestClient(app) as client, client.websocket_connect("/ws?analyze=0") as ws:  # eski uç adı
-        ws.receive_json()
-        speak(ws, np.concatenate([tone(1.5), silence(1.0)]))
-        ws.send_text('{"type": "stop"}')
-        while (m := ws.receive_json())["type"] != "done":
-            pass
-    assert m["job_id"] is None and sent == []
+    with TestClient(app) as client:  # eski uç adı da çalışır
+        _, _, done = session(client, "/ws?analyze=0", np.concatenate([tone(1.5), silence(1.0)]))
+    assert done["job_id"] is None and sent == []
 
 
 def test_konusma_yoksa_toplu_is_acilmaz(local):
     app, _, sent, _ = local
-    with TestClient(app) as client, client.websocket_connect("/ws/live") as ws:
-        ws.receive_json()
-        speak(ws, silence(1.0))
-        ws.send_text('{"type": "stop"}')
-        while (m := ws.receive_json())["type"] != "done":
-            pass
-    assert m["job_id"] is None and sent == []
+    with TestClient(app) as client:
+        _, _, done = session(client, "/ws/live", silence(1.0))
+    assert done["job_id"] is None and sent == []
 
 
 def test_model_yuklenemezse_hata_mesaji(tmp_path, monkeypatch):
-    from live_stream.interface import local_server
     from live_stream.interface.live_server import LiveEngine
-    from live_stream.interface.settings import Settings
 
     def bozuk():
         raise RuntimeError("CUDA yok")
 
-    monkeypatch.setattr(local_server, "build_pipeline", lambda cfg, store, **kw: NS(engines={}))
-    s = Settings(data_dir=str(tmp_path / "up"), recordings_dir=str(tmp_path / "rec"), languages=["tr"])
-    app, *_ = local_server.build_local(s, workers=1, warm_up=False,
-                                       live_engine=LiveEngine(bozuk, "x"), live_detector=EnergyDetector)
+    app, *_ = make_local(tmp_path, monkeypatch, languages=("tr",),
+                         engines={"tr": LiveEngine(bozuk, "x")})
     with TestClient(app) as client, client.websocket_connect("/ws/live") as ws:
         m = ws.receive_json()
     assert m["type"] == "error" and "CUDA yok" in m["message"]

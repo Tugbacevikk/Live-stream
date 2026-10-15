@@ -1,7 +1,8 @@
 """Kabul testi: "1 dakikalık ses en geç 1 dakikada biter" bu bilgisayarda sağlanıyor mu?
 
-    python benchmarks/kabul_testi.py ses1.wav ses2.mp3            # Türkçe, varsayılan model
-    python benchmarks/kabul_testi.py --tr-model faster-whisper-small kayit.wav
+    python benchmarks/kabul_testi.py ses1.wav ses2.mp3            # dil sesten bulunur
+    python benchmarks/kabul_testi.py --dil tr kayit.wav           # Türkçe, tespit atlanır
+    python benchmarks/kabul_testi.py --dil tr --tr-model faster-whisper-small kayit.wav
     python benchmarks/kabul_testi.py --device cpu kayit.wav       # sunucu koşulu: yalnızca CPU
     python benchmarks/kabul_testi.py --es-zamanli 4 a.wav b.wav   # aynı anda 4 iş (yük altında)
 
@@ -68,7 +69,8 @@ def manifest_digest(models_dir: Path) -> str | None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("dosyalar", nargs="+")
-    p.add_argument("--dil", default="tr", help="tr")
+    p.add_argument("--dil", default=None, help="vi / tr; verilmezse sesten bulunur")
+    p.add_argument("--vi-model", default=None)
     p.add_argument("--tr-model", default=None)
     p.add_argument("--device", default="cpu", choices=["cpu", "auto", "cuda"],
                    help="faster-whisper cihazı (sunucu hedefi CPU olduğu için varsayılan cpu)")
@@ -80,7 +82,7 @@ def main() -> int:
     p.add_argument("--cikti", default="kabul_sonucu.json")
     a = p.parse_args()
 
-    models = {"tr": a.tr_model} if a.tr_model else {}
+    models = {k: v for k, v in (("vi", a.vi_model), ("tr", a.tr_model)) if v}
     cfg = default_config(a.models_dir, models=models, threads=a.threads, device=a.device)
     pipe = build_pipeline(cfg, MemoryJobStore())
     t0 = time.perf_counter()

@@ -1,6 +1,7 @@
 """Komut satırı: tek bir ses dosyasını konuşmacılı metne çevirir.
 
-    python -m live_stream.interface.cli kayit.wav
+    python -m live_stream.interface.cli kayit.wav                 # dil sesten tespit edilir
+    python -m live_stream.interface.cli kayit.wav --lang vi       # dil verilir, tespit atlanır
     python -m live_stream.interface.cli kayit.wav --speakers 2 --json sonuc.json
     python -m live_stream.interface.cli kayit.wav --tr-model faster-whisper-small --device cpu
 
@@ -24,25 +25,27 @@ MemoryRepo = MemoryJobStore  # geriye dönük ad
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="Ses -> konuşmacılı metin (Türkçe)")
+    p = argparse.ArgumentParser(description="Ses -> konuşmacılı metin (Türkçe, Vietnamca)")
     p.add_argument("audio")
-    p.add_argument("--lang", default="tr", help="tr")
-    p.add_argument("--languages", default="tr", help="sistemde açık diller")
+    p.add_argument("--lang", default="auto", help="tr, vi ya da auto (sesten tespit)")
+    p.add_argument("--languages", default="tr,vi", help="sistemde açık diller")
+    p.add_argument("--vi-model", default=None, help=f"{MODEL_CHOICES['vi']} ya da model klasörü")
     p.add_argument("--tr-model", default=None, help=f"{MODEL_CHOICES['tr']}")
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
                    help="faster-whisper: auto = GPU varsa GPU")
     p.add_argument("--models-dir", default="models")
     p.add_argument("--speakers", type=int, default=0, help="konuşmacı sayısı; 0: sesten bul")
     p.add_argument("--diarizer", choices=["cluster", "pyannote"], default="cluster")
-    p.add_argument("--hotwords", default=None, help="özel terimler, boşlukla (ör. 'YOLOv8 TÜBİTAK')")
+    p.add_argument("--hotwords", default=None, help="Türkçe özel terimler, boşlukla (ör. 'YOLOv8 TÜBİTAK')")
+    p.add_argument("--vi-hotwords", default=None, help="Vietnamca terim dosyası (BÜYÜK HARF)")
     p.add_argument("--threads", type=int, default=2)
     p.add_argument("--json", default=None)
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    models = {"tr": a.tr_model} if a.tr_model else {}
+    models = {k: v for k, v in (("vi", a.vi_model), ("tr", a.tr_model)) if v}
     cfg = default_config(a.models_dir, tuple(a.languages.split(",")), models, a.threads,
-                         a.speakers, a.hotwords, a.diarizer, device=a.device)
+                         a.speakers, a.hotwords, a.diarizer, device=a.device, vi_hotwords=a.vi_hotwords)
     repo = MemoryRepo()
     job = AudioJob(job_id=Path(a.audio).stem, audio_path=a.audio,
                    language=None if a.lang == "auto" else a.lang)

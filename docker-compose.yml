@@ -9,7 +9,7 @@
 
 x-app: &app
   build: .
-  image: live-stream:0.4.0
+  image: live-stream:0.5.0
   restart: unless-stopped
   env_file: [{path: .env, required: false}]
   environment: &env
@@ -18,7 +18,8 @@ x-app: &app
     WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
     DATABASE_URL: postgresql://asr:asr@postgres:5432/asr
     REDIS_URL: redis://redis:6379/0
-    LANGUAGES: tr
+    LANGUAGES: tr,vi
+    VI_MODEL: zipformer-68m
     WHISPER_DEVICE: cpu          # sunucu: yalnızca CPU
     TR_MODEL: ${TR_MODEL:-faster-whisper-medium}
     ONNX_THREADS: "2"
@@ -63,6 +64,20 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       retries: 5
+
+  worker-lid:          # dil tespiti: hafif, 1 süreç çoğu zaman yeter (~0,25 sn/ses)
+    <<: *app
+    command: ["python", "-m", "live_stream.interface.stream_worker", "--kuyruk", "lid"]
+    environment:
+      <<: *env
+      CONCURRENCY: "1"
+
+  worker-vi:           # Vietnamca: Zipformer ~0,5 GB/süreç
+    <<: *app
+    command: ["python", "-m", "live_stream.interface.stream_worker", "--kuyruk", "vi"]
+    environment:
+      <<: *env
+      CONCURRENCY: auto
 
   worker-tr:           # Türkçe: faster-whisper medium ~1,8 GB/süreç; sayı bellek ve çekirdekten
     <<: *app

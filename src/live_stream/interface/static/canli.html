@@ -68,6 +68,7 @@
   <h1>Canlı Altyazı</h1>
   <a class="btn" href="/" title="Dosya yükle, geçmiş oturumların konuşmacılı transkriptleri">◂ Ses Analizi</a>
   <button id="startBtn" class="primary">🎙 Başlat</button>
+  <select id="langSel" title="Konuşma dili"><option value="tr">Türkçe</option></select>
   <select id="micSel" title="Mikrofon"><option value="">Varsayılan mikrofon</option></select>
   <label class="btn" for="fileIn" title="Bir kaydı gerçek zaman hızında çalarak test et">📄 Dosyayla test</label>
   <input id="fileIn" type="file" accept="audio/*">
@@ -178,6 +179,7 @@ function closeAudio() {
 function connect() {
   offset = sent / 16000;  // yeniden bağlanınca zaman damgaları kaldığı yerden devam etsin
   const p = new URLSearchParams({
+    language: $("langSel").value,
     silence_ms: $("silence_ms").value, partial_sec: $("partial_sec").value,
     max_sec: $("max_sec").value, save: $("save").checked ? "1" : "0",
     analyze: $("save").checked && $("analyze").checked ? "1" : "0" });
@@ -189,11 +191,14 @@ function connect() {
     const m = JSON.parse(e.data);
     if (m.type === "ready") {
       setStatus("Dinleniyor", "live");
-      $("dev").hidden = false; $("dev").textContent = `${m.model.replace("faster-whisper-", "")} · ${m.device === "cuda" ? "GPU" : "CPU"}`;
+      if (m.model) showModel(m.model, m.device, m.language);
+      else { $("dev").hidden = false; $("dev").textContent = "dil bekleniyor…"; }
       if (!ctx) {
         try { await openAudio(source); }
         catch (err) { setStatus("Ses açılamadı: " + err.message); running = false; ws.close(); resetButtons(); }
       }
+    } else if (m.type === "language") {
+      showModel(m.model, m.device, m.code, m.confidence);
     } else if (m.type === "partial") {
       partialEl.textContent = m.text;
       follow();
@@ -250,15 +255,22 @@ function setStatus(text, state) {
   $("st").textContent = text;
   $("dot").className = "dot" + (state ? " " + state : "");
 }
+const LANGS = { tr: "Türkçe", vi: "Vietnamca" };
+function showModel(model, device, lang, conf) {
+  const name = (model || "").replace("faster-whisper-", "").replace("zipformer-", "Zipformer-");
+  const det = conf != null && conf < 1 ? ` (bulundu %${Math.round(conf * 100)})` : "";
+  $("dev").hidden = false;
+  $("dev").textContent = `${LANGS[lang] || lang}${det} · ${name} · ${device === "cuda" ? "GPU" : "CPU"}`;
+}
 function resetButtons() {
-  $("startBtn").disabled = false; $("fileIn").disabled = false; $("stopBtn").disabled = true; $("micSel").disabled = false;
+  $("startBtn").disabled = false; $("fileIn").disabled = false; $("stopBtn").disabled = true; $("micSel").disabled = false; $("langSel").disabled = false;
 }
 
 /* ---------- Başlat / Durdur ---------- */
 async function start(kind) {
   if (running) return;
   running = true; source = kind; offset = 0; sent = 0; $("jobLink").hidden = true;
-  $("startBtn").disabled = true; $("fileIn").disabled = true; $("stopBtn").disabled = false; $("micSel").disabled = true;
+  $("startBtn").disabled = true; $("fileIn").disabled = true; $("stopBtn").disabled = false; $("micSel").disabled = true; $("langSel").disabled = true;
   setStatus("Model hazırlanıyor…");
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
   connect();
@@ -286,6 +298,21 @@ async function listMics() {
 }
 navigator.mediaDevices?.addEventListener?.("devicechange", listMics);
 listMics();
+
+/* ---------- Dil listesi (sunucuda açık diller) ---------- */
+async function listLangs() {
+  try {
+    const h = await (await fetch("/live/health")).json();
+    const opts = h.languages.map((l) => `<option value="${l.code}">${l.name}</option>`);
+    if (h.auto) opts.push('<option value="auto">Otomatik (ilk cümleden)</option>');
+    $("langSel").innerHTML = opts.join("");
+    let saved = null; try { saved = localStorage.getItem("captionLang"); } catch {}
+    const want = [saved, h.default].find((v) => v && [...$("langSel").options].some((o) => o.value === v));
+    if (want) $("langSel").value = want;
+  } catch {}
+}
+$("langSel").onchange = () => { try { localStorage.setItem("captionLang", $("langSel").value); } catch {} };
+listLangs();
 
 /* ---------- Kontroller ---------- */
 function setSize(px) {

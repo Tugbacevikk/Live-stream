@@ -1,9 +1,12 @@
 """Dile özel metin düzeltme.
 
-Türkçe (Whisper): çıktı büyük/küçük harf ve noktalama içerir. Sistem çıktısında
-  (normalizer_for) küçük harfe çevrilir ve noktalama silinir (13 Ekim kararı:
-  noktalama gerekmiyor, entegre sistem tek biçim alır). Canlı altyazı ekranı ise
-  okunaklı olsun diye noktalamayı korur (live_normalizer).
+Vietnamca (Zipformer): çıktı BÜYÜK HARF ve noktalamasız gelir -> NFC + küçük harf.
+  NFC önemli: aynı aksanlı harfin iki farklı kodlanışı tek biçime iner, yoksa
+  WER yapay olarak artar.
+Türkçe (Whisper): çıktı büyük/küçük harf ve noktalama içerir. Toplu iş çıktısında
+  (normalizer_for) iki dil aynı biçimde olsun diye küçük harfe çevrilir ve noktalama
+  silinir (13 Ekim kararı: noktalama gerekmiyor, entegre sistem tek biçim alır).
+  Canlı altyazı ekranı ise okunaklı olsun diye noktalamayı korur (live_normalizer).
   Küçük harf Türkçe kuralıyla (I -> ı, İ -> i); Python'un lower() bunu yanlış yapar.
   Kesme işareti kelime içindeyse kalır ("istanbul'da"), ondalık ayırıcı da ("3,5").
 """
@@ -31,7 +34,7 @@ def _is_latin(ch: str) -> bool:
 
 
 def _latin_word(w: str) -> bool:
-    """Harflerin hepsi Latin alfabesinden mi (Türkçe harfler dahil; rakam serbest)."""
+    """Harflerin hepsi Latin alfabesinden mi (Türkçe ve Vietnamca harfler dahil; rakam serbest)."""
     return all(not ch.isalpha() or _is_latin(ch) for ch in w)
 
 
@@ -52,9 +55,17 @@ def _clean(text: str, strip_punct: bool, latin_only: bool = False) -> str:
     if latin_only:
         # Çok dilli modeller (Omnilingual 1600 dil, Whisper) müzik/gürültüde başka alfabeden
         # "kelime" uydurabiliyor (14 Ekim: Türkçe podcast sonunda Devanagari "कजतच").
-        # Türkçe Latin alfabesiyle yazılır: başka alfabedeki kelime atılır.
+        # Türkçe ve Vietnamca Latin alfabesiyle yazılır: başka alfabedeki kelime atılır.
         words = [f for f in map(_latin_fix, words) if f]
     return " ".join(words)
+
+
+class ViNormalizer:
+    def __init__(self, strip_punct: bool = False, latin_only: bool = False):
+        self.strip_punct, self.latin_only = strip_punct, latin_only
+
+    def normalize(self, text: str) -> str:
+        return _clean(unicodedata.normalize("NFC", text).lower(), self.strip_punct, self.latin_only)
 
 
 def turkish_lower(text: str) -> str:
@@ -73,10 +84,16 @@ class TrNormalizer:
 
 
 def normalizer_for(lang: str):
-    """Toplu iş çıktısının biçimi: küçük harf, noktalamasız (yeni dil eklenirse burada)."""
+    """Sistem çıktısının biçimi: iki dilde de küçük harf, noktalamasız."""
+    if lang == "vi":
+        return ViNormalizer(strip_punct=True, latin_only=True)
     return TrNormalizer(lowercase=True, strip_punct=True, latin_only=True)
 
 
 def live_normalizer(lang: str):
-    """Canlı altyazı: büyük harf ve noktalama korunur (ekranda okunur), yabancı alfabe süzülür."""
+    """Canlı altyazı ekranı. Türkçe: büyük harf ve noktalama korunur (Whisper üretir).
+    Vietnamca: Zipformer noktalamasız BÜYÜK HARF yazar -> küçük harf. İkisinde de başka
+    alfabeden uydurma kelime süzülür."""
+    if lang == "vi":
+        return ViNormalizer(strip_punct=False, latin_only=True)
     return TrNormalizer(lowercase=False, strip_punct=False, latin_only=True)

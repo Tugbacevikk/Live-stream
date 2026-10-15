@@ -1,14 +1,19 @@
-"""Canlı altyazı uçları (yerel sunucuya eklenir; aynı süreç, aynı model).
+"""Canlı altyazı uçları (yerel sunucuya eklenir; aynı süreç, toplu işle aynı modeller).
 
-    GET /canli      -> altyazı ekranı (sunum modu: F, yazı boyu: + / -)
-    WS  /ws/live    -> canlı ses akışı  (/ws: ilk sürümün istemcileri için aynı uç)
+    GET /canli        -> altyazı ekranı (sunum modu: F, yazı boyu: + / -)
+    GET /live/health  -> diller ve modellerin durumu
+    WS  /ws/live      -> canlı ses akışı  (/ws: ilk sürümün istemcileri için aynı uç)
 
 WebSocket protokolü
   İstemci -> Sunucu : ikili mesaj = Int16 little-endian PCM, 16 kHz, mono
                       metin mesajı {"type": "stop"} = son parçayı işle ve kapat
-                      sorgu parametreleri (isteğe bağlı): silence_ms, partial_sec, max_sec,
-                      save (1/0), analyze (1/0: oturum sonu toplu işe gönder)
-  Sunucu -> İstemci : {"type": "ready", "device": "cuda", "model": "...", "recording": "..."}
+                      sorgu parametreleri (isteğe bağlı): language (tr | vi | auto),
+                      silence_ms, partial_sec, max_sec, save (1/0),
+                      analyze (1/0: oturum sonu toplu işe gönder)
+  Sunucu -> İstemci : {"type": "ready", "language": "tr"|"auto", "device": "cuda", "model": "...",
+                       "recording": "..."}
+                      {"type": "language", "code": "vi", "confidence": 0.97, "model": "...",
+                       "device": "cpu"}   ('auto' seçildiyse ilk cümleden sonra bir kez)
                       {"type": "partial", "start": 3.1, "text": "..."}
                       {"type": "final", "id": 0, "start": 3.1, "end": 5.4, "text": "..."}
                       {"type": "discard", "start": 3.1}
@@ -30,16 +35,16 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from live_stream.application.live import FinalJob, LiveSession, Segmenter, SegmenterConfig
+from live_stream.application.live import FinalJob, LanguageLock, LiveSession, Segmenter, SegmenterConfig
 from live_stream.infrastructure.recorder import SessionRecorder
 
 log = logging.getLogger(__name__)
 _PAGE = Path(__file__).parent / "static" / "canli.html"
+LANG_NAMES = {"tr": "Türkçe", "vi": "Vietnamca"}
 
 
 class LiveEngine:
-    """Canlı altyazının ASR motoru: arka planda yüklenir, çıkarımlar sırayla yapılır
-    (aynı anda birden çok canlı bağlantı GPU'yu boğmasın)."""
+    """Bir dilin canlı ASR motoru: arka planda yüklenir (ilk konuşmada beklenmesin)."""
 
     def __init__(self, load: Callable[[], object], model_name: str, normalizer=None):
         self._load_fn = load
@@ -49,14 +54,12 @@ class LiveEngine:
         self.load_error: str | None = None
         self._thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
-        self._lock: asyncio.Lock | None = None
 
     @property
     def device(self) -> str | None:
-        return getattr(self.asr, "device", None)
+        return getattr(self.asr, "device", None) or ("cpu" if self.asr is not None else None)
 
     def start_loading(self) -> None:
-        """Yüklemeyi arka planda başlatır (sunucu açılırken; ilk konuşmada beklenmesin)."""
         with self._start_lock:
             if self._thread is None:
                 self._thread = threading.Thread(target=self._load, daemon=True, name="canli-model")
@@ -67,27 +70,35 @@ class LiveEngine:
             self.asr = self._load_fn()
         except Exception as e:
             self.load_error = f"{type(e).__name__}: {e}"
-            log.exception("canlı altyazı modeli yüklenemedi")
+            log.exception("canlı altyazı modeli yüklenemedi (%s)", self.model_name)
 
-    async def wait_ready(self) -> None:
+    def ensure_loaded(self) -> None:
+        """Yüklenene kadar bekler (iş parçacığında çağrılır); yüklenemediyse hata."""
         self.start_loading()
-        await asyncio.to_thread(self._thread.join)
+        self._thread.join()
         if self.load_error:
             raise RuntimeError(self.load_error)
 
+    async def wait_ready(self) -> None:
+        await asyncio.to_thread(self.ensure_loaded)
+
     def transcribe(self, audio, fast: bool, prompt: str | None) -> str:
+        self.ensure_loaded()
         return self.asr.transcribe_text(audio, fast=fast, prompt=prompt, normalizer=self.normalizer)
 
-    async def run(self, fn, job):
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
+
+def add_live_routes(app: FastAPI, settings, engines: dict[str, LiveEngine], detector_factory: Callable,
+                    submit_recording: Callable[[str, str | None], str | None] | None = None,
+                    detect_language: Callable | None = None) -> None:
+    """engines: dil kodu -> motor. detect_language(ses) -> LanguageDecision ('auto' için).
+    submit_recording(ses yolu, dil) -> toplu iş kimliği: oturum sonu konuşmacı ayrımı için."""
+    languages = list(engines)
+    default = settings.live_language if settings.live_language in (*languages, "auto") else languages[0]
+    infer_lock = asyncio.Lock()  # çıkarımlar sırayla: birden çok canlı bağlantı GPU'yu boğmasın
+
+    async def run(fn, job):
+        async with infer_lock:
             return await asyncio.to_thread(fn, job)
-
-
-def add_live_routes(app: FastAPI, settings, engine: LiveEngine, detector_factory: Callable,
-                    submit_recording: Callable[[str], str | None] | None = None) -> None:
-    """submit_recording(ses yolu) -> toplu iş kimliği: oturum sonu konuşmacı ayrımı için."""
 
     @app.get("/canli", include_in_schema=False)
     def live_page():
@@ -95,8 +106,14 @@ def add_live_routes(app: FastAPI, settings, engine: LiveEngine, detector_factory
 
     @app.get("/live/health")
     def live_health():
-        return {"ready": engine.asr is not None, "error": engine.load_error,
-                "device": engine.device, "model": engine.model_name}
+        return {
+            "languages": [{"code": c, "name": LANG_NAMES.get(c, c), "model": e.model_name,
+                           "ready": e.asr is not None, "error": e.load_error, "device": e.device}
+                          for c, e in engines.items()],
+            "default": default,
+            "auto": len(languages) > 1 and detect_language is not None,
+            "ready": all(e.asr is not None for e in engines.values()),
+        }
 
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -113,21 +130,37 @@ def add_live_routes(app: FastAPI, settings, engine: LiveEngine, detector_factory
             await ws.send_json({"type": "error", "message": "Geçersiz ayar değeri."})
             await ws.close()
             return
+        lang = q.get("language", default).strip().lower()
+        if lang == "auto" and (len(languages) == 1 or detect_language is None):
+            lang = languages[0]  # tek dil açık: tespit gereksiz
+        if lang != "auto" and lang not in engines:
+            await ws.send_json({"type": "error", "message":
+                                f"'{lang}' dili açık değil; seçenekler: {', '.join(languages)}"})
+            await ws.close()
+            return
 
-        try:
-            await engine.wait_ready()
+        try:  # dil belliyse onun modeli, 'auto' ise hepsi hazır olsun
+            for code in ([lang] if lang != "auto" else languages):
+                await engines[code].wait_ready()
         except Exception as e:
             await ws.send_json({"type": "error", "message": f"Model yüklenemedi: {e}"})
             await ws.close()
             return
 
+        lock = LanguageLock(None if lang == "auto" else lang, detect_language, fallback=languages[0])
+
+        def transcribe(audio, fast, prompt):
+            code = lock.decide(audio, final=not fast)
+            return "" if code is None else engines[code].transcribe(audio, fast, prompt)
+
         detector = await asyncio.to_thread(detector_factory)
         recorder = SessionRecorder(settings.recordings_dir) if save else None
-        session = LiveSession(Segmenter(detector, seg_cfg), engine.transcribe, recorder)
+        session = LiveSession(Segmenter(detector, seg_cfg), transcribe, recorder)
 
         finals: asyncio.Queue[FinalJob | None] = asyncio.Queue()
         send_lock = asyncio.Lock()
         partial_busy = False
+        announced = False
         t_start: float | None = None  # ilk ses paketinin geldiği an
 
         async def send(msg: dict | None):
@@ -139,10 +172,21 @@ def add_live_routes(app: FastAPI, settings, engine: LiveEngine, detector_factory
                 except Exception:
                     pass
 
+        async def announce():
+            """'auto' seçildiyse dil bulununca bir kez bildirir."""
+            nonlocal announced
+            if lock.detected and not announced:
+                announced = True
+                e = engines[lock.code]
+                await send({"type": "language", "code": lock.code, "confidence": lock.confidence,
+                            "model": e.model_name, "device": e.device})
+
         async def final_worker():
             while (job := await finals.get()) is not None:
                 try:
-                    await send(await engine.run(session.run_final, job))
+                    msg = await run(session.run_final, job)
+                    await announce()
+                    await send(msg)
                     # gecikme: konuşmanın bittiği an ile metnin hazır olduğu an arası
                     lag = (time.monotonic() - (t_start or time.monotonic())) - job.end
                     await send({"type": "stats", "lag_sec": round(max(0.0, lag), 2)})
@@ -154,7 +198,9 @@ def add_live_routes(app: FastAPI, settings, engine: LiveEngine, detector_factory
             nonlocal partial_busy
             try:
                 if finals.empty():  # bekleyen kesin metin varsa ara metin gereksiz
-                    await send(await engine.run(session.run_partial, job))
+                    msg = await run(session.run_partial, job)
+                    await announce()
+                    await send(msg)
             except Exception as e:
                 log.warning("ara metin hatası: %s", e)
             finally:
@@ -173,13 +219,16 @@ def add_live_routes(app: FastAPI, settings, engine: LiveEngine, detector_factory
             if not (analyze and path and submit_recording and session.lines):
                 return None
             try:
-                return await asyncio.to_thread(submit_recording, path)
+                return await asyncio.to_thread(submit_recording, path, lock.code)
             except Exception as e:
                 log.warning("kayıt toplu işe gönderilemedi: %s", e)
                 return None
 
         worker = asyncio.create_task(final_worker())
-        await send({"type": "ready", "device": engine.device, "model": engine.model_name,
+        first = engines[lang] if lang != "auto" else None
+        await send({"type": "ready", "language": lang,
+                    "device": first.device if first else None,
+                    "model": first.model_name if first else None,
                     "recording": recorder.name if recorder else None})
 
         finished = False

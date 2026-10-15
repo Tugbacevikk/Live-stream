@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ses Analizi</title>
+<!-- Fine-tuning projesindeki arayüzden uyarlandı. İnternetsiz sunucuda da çalışsın diye
+     dış yazı tipi/kütüphane yok; metinler innerHTML yerine textContent ile basılır. -->
+<style>
+:root {
+  --bg: #0f172a; --card: rgba(30, 41, 59, .75); --line: rgba(255, 255, 255, .1);
+  --text: #f8fafc; --muted: #94a3b8; --accent: #8b5cf6; --accent2: #06b6d4;
+  --ok: #10b981; --warn: #f59e0b; --bad: #ef4444; --input: #0b1222;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f1f5f9; --card: #ffffff; --line: #e2e8f0; --text: #0f172a; --muted: #64748b;
+          --input: #f8fafc; }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg);
+       color: var(--text); min-height: 100vh; padding: 24px 16px; }
+.wrap { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+h1 { font-size: 1.5rem; font-weight: 650; }
+.sub { color: var(--muted); font-size: .9rem; margin-top: 2px; }
+.key { display: flex; gap: 8px; align-items: center; font-size: .85rem; color: var(--muted); }
+input, select, button { font: inherit; }
+input[type=password], select { background: var(--input); color: var(--text); border: 1px solid var(--line);
+       border-radius: 8px; padding: 7px 10px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+.drop { border: 2px dashed var(--line); border-radius: 12px; padding: 28px 16px; text-align: center;
+        cursor: pointer; transition: border-color .15s; }
+.drop:hover, .drop.over { border-color: var(--accent); }
+.drop strong { display: block; font-size: 1.05rem; margin-bottom: 4px; overflow-wrap: anywhere; }
+.drop span { color: var(--muted); font-size: .85rem; }
+.opts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; align-items: end; }
+.opts label { display: flex; flex-direction: column; gap: 4px; font-size: .8rem; color: var(--muted); flex: 1 1 160px; }
+.btn { border: 0; border-radius: 8px; padding: 9px 16px; font-weight: 600; cursor: pointer;
+       background: var(--accent); color: #fff; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 500; padding: 6px 12px; font-size: .85rem; }
+.btn.danger { background: transparent; border: 1px solid var(--bad); color: var(--bad); font-weight: 500; padding: 6px 12px; font-size: .85rem; }
+.status { margin-top: 14px; font-size: .9rem; color: var(--muted); min-height: 1.2em; }
+.status.err { color: var(--bad); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+h2 { font-size: 1.15rem; font-weight: 600; }
+dialog { margin: auto; background: var(--card, var(--input)); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 18px; max-width: 420px; width: calc(100% - 32px); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog label { display: block; font-size: .85rem; margin: 10px 0 4px; }
+dialog input[type=text], dialog select, dialog textarea { width: 100%; font: inherit; background: var(--input); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+dialog .sub { margin-top: 6px; }
+dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.sub a { color: var(--accent); }
+.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 14px 0; }
+.meta div { background: var(--input); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.meta b { display: block; font-size: .72rem; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .03em; }
+.meta span { font-size: .95rem; }
+audio { width: 100%; margin-bottom: 12px; }
+.utt { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.utt:hover { background: rgba(139, 92, 246, .06); }
+.utt .who { font-size: .8rem; font-weight: 600; }
+.utt .t { font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.utt p { line-height: 1.5; overflow-wrap: anywhere; }
+.utt .body { display: flex; gap: 8px; align-items: flex-start; }
+.utt .body p { flex: 1; }
+.edit-btn { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px;
+            padding: 2px 8px; font-size: .75rem; cursor: pointer; white-space: nowrap; }
+.edit-btn:hover { color: var(--text); border-color: var(--accent); }
+.mark { font-size: .7rem; color: var(--ok); margin-left: 6px; font-weight: 500; }
+.low { text-decoration: underline wavy var(--warn); text-underline-offset: 3px; }
+.editor { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.editor textarea { font: inherit; background: var(--input); color: var(--text); border: 1px solid var(--accent);
+                   border-radius: 8px; padding: 8px; min-height: 70px; resize: vertical; }
+.editor input { font: inherit; background: var(--input); color: var(--text); border: 1px solid var(--line);
+                border-radius: 8px; padding: 6px 8px; max-width: 220px; }
+.editor .row { justify-content: flex-start; }
+.hist { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.hist button { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; text-align: left; background: var(--input);
+       border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; color: var(--text); cursor: pointer; }
+.hist small { color: var(--muted); }
+.badge { font-size: .72rem; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); white-space: nowrap; }
+.badge.done { color: var(--ok); border-color: var(--ok); } .badge.failed, .badge.rejected { color: var(--bad); border-color: var(--bad); }
+.badge.running, .badge.queued { color: var(--warn); border-color: var(--warn); }
+.hidden { display: none !important; }
+@media (max-width: 560px) { .utt { grid-template-columns: 1fr; gap: 2px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Ses Analizi</h1>
+      <div class="sub">Konuşmayı metne çevirir, kimin ne zaman konuştuğunu ayırır · <a href="/canli">Canlı altyazı →</a></div>
+    </div>
+    <div class="key">
+      <span class="dot" id="health" title="sunucu durumu"></span>
+      <label for="apiKey">API anahtarı</label>
+      <input type="password" id="apiKey" placeholder="gerekmiyorsa boş" autocomplete="off">
+    </div>
+  </header>
+
+  <section class="card">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Ses dosyası seç">
+      <strong id="fileName">Ses dosyasını sürükleyin ya da seçin</strong>
+      <span>WAV, MP3, FLAC, OGG, OPUS (M4A, AAC, AMR, WEBM için sunucuda ffmpeg gerekir)</span>
+      <input type="file" id="file" accept="audio/*,.amr,.opus" class="hidden">
+    </div>
+    <div class="opts">
+      <label>Dil
+        <select id="lang">
+          <option value="tr">Türkçe</option>
+        </select>
+      </label>
+      <label>Konuşmacı sayısı
+        <select id="speakers"><option value="">Otomatik</option></select>
+      </label>
+      <label>İşlem
+        <select id="profile">
+          <option value="">Varsayılan</option>
+          <option value="full">Tam</option>
+          <option value="feedback">Hızlı (kısa geri bildirim)</option>
+        </select>
+      </label>
+      <button class="btn" id="send" disabled>Analiz et</button>
+    </div>
+    <div class="status" id="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card hidden" id="result">
+    <div class="row">
+      <h2>Sonuç</h2>
+      <div class="row" style="justify-content:flex-end">
+        <button class="btn ghost" data-export="txt">TXT</button>
+        <button class="btn ghost" data-export="srt">SRT</button>
+        <button class="btn ghost" data-export="json">JSON</button>
+        <button class="btn ghost" data-export="rttm" title="konuşmacı zamanları (DER ölçümü için)">RTTM</button>
+        <button class="btn ghost" id="reanalyze" title="konuşmacı sayısını düzeltip aynı sesi yeniden analiz et">Yeniden analiz</button>
+        <button class="btn ghost hidden" id="toDataset" title="kontrol edilmiş sonucu test/eğitim verisinin onay kuyruğuna koy">Veri setine ekle</button>
+        <button class="btn danger" id="del">Sil</button>
+      </div>
+    </div>
+    <div class="meta" id="meta"></div>
+    <audio id="player" controls preload="none"></audio>
+    <div id="utts"></div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <h2>Geçmiş</h2>
+      <button class="btn ghost" id="refresh">Yenile</button>
+    </div>
+    <div class="hist" id="hist"></div>
+  </section>
+</div>
+
+<dialog id="dsDialog">
+  <form method="dialog" id="dsForm">
+    <b>Veri setine ekle</b>
+    <p class="sub">Satırları kontrol ettikten sonra kullanın. Kayıt onay kuyruğuna düşer; asıl ekleme scripts/veri_seti.py onayla ile yapılır.</p>
+    <label for="dsReviewer">Kontrol eden</label>
+    <input type="text" id="dsReviewer" required maxlength="100">
+    <label for="dsUse">Kullanım</label>
+    <select id="dsUse"><option value="test">Test (doğruluk ölçümü)</option><option value="egitim">Eğitim (ince ayar)</option></select>
+    <label for="dsNotes">Not (isteğe bağlı)</label>
+    <textarea id="dsNotes" rows="2" maxlength="500"></textarea>
+    <label><input type="checkbox" id="dsConsent"> Bu kaydın veri setinde kullanılmasına izin var</label>
+    <div class="row"><button class="btn ghost" value="cancel" formnovalidate>Vazgeç</button><button class="btn" value="ok" id="dsOk" disabled>Gönder</button></div>
+  </form>
+</dialog>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const COLORS = ["#8b5cf6", "#06b6d4", "#f59e0b", "#10b981", "#ef4444", "#ec4899", "#84cc16", "#3b82f6"];
+const LANG = { tr: "Türkçe" };
+const SOURCE = { istek: "istekte verildi", tespit: "sesten bulundu", varsayilan: "varsayılan" };
+const STATUS = { queued: "kuyrukta", running: "işleniyor", done: "bitti", failed: "hata", rejected: "reddedildi" };
+let current = null, file = null, pollTimer = null, stopAt = null, audioUrl = null;
+
+const store = {  // tarayıcı depolaması kapalıysa da sayfa çalışsın
+  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* yok say */ } },
+};
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k === "style") e.style.cssText = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids) e.append(k);
+  return e;
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  const key = $("apiKey").value.trim();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).detail || msg; } catch { /* gövde JSON değil */ }
+    if (res.status === 401) msg = "API anahtarı gerekli ya da yanlış";
+    throw new Error(msg);
+  }
+  return res;
+}
+
+function setStatus(text, err = false) { $("status").textContent = text; $("status").className = "status" + (err ? " err" : ""); }
+function fmt(s) { const m = Math.floor(s / 60); return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`; }
+// speaker_00 -> "Konuşmacı 1"; elle verilen ad (ör. "doktor") olduğu gibi gösterilir
+function speakerName(s) {
+  if (s === "BELIRSIZ") return "Belirsiz";
+  const m = /^speaker_(\d+)$/.exec(s);
+  return m ? "Konuşmacı " + (parseInt(m[1], 10) + 1) : s;
+}
+function colorOf(s) {
+  if (s === "BELIRSIZ") return "var(--muted)";
+  const m = /^speaker_(\d+)$/.exec(s);
+  const k = m ? parseInt(m[1], 10) : [...s].reduce((a, ch) => a + ch.charCodeAt(0), 0);
+  return COLORS[k % COLORS.length];
+}
+
+// --- dosya seçimi ---
+for (let i = 1; i <= 10; i++) $("speakers").append(el("option", { value: String(i) }, `${i} kişi`));
+function pick(f) { file = f; $("fileName").textContent = f ? f.name : "Ses dosyasını sürükleyin ya da seçin"; $("send").disabled = !f; }
+$("drop").addEventListener("click", () => $("file").click());
+$("drop").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file").click(); } });
+$("file").addEventListener("change", (e) => pick(e.target.files[0] || null));
+$("drop").addEventListener("dragover", (e) => { e.preventDefault(); $("drop").classList.add("over"); });
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+$("drop").addEventListener("drop", (e) => { e.preventDefault(); $("drop").classList.remove("over"); pick(e.dataTransfer.files[0] || null); });
+
+$("send").addEventListener("click", async () => {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("language", $("lang").value);
+  if ($("speakers").value) fd.append("num_speakers", $("speakers").value);
+  if ($("profile").value) fd.append("profile", $("profile").value);
+  $("send").disabled = true;
+  setStatus("Yükleniyor…");
+  try {
+    const r = await (await api("/jobs", { method: "POST", body: fd })).json();
+    setStatus(`Kuyrukta (ses ${fmt(r.duration)})…`);
+    poll(r.job_id, performance.now());
+    loadHistory();
+  } catch (e) { setStatus("Yüklenemedi: " + e.message, true); $("send").disabled = false; }
+});
+
+function poll(jobId, t0) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    try {
+      const j = await (await api(`/jobs/${encodeURIComponent(jobId)}`)).json();
+      const sec = ((performance.now() - t0) / 1000).toFixed(0);
+      if (j.status === "done") { setStatus(`Bitti (${sec} sn).`); $("send").disabled = !file; show(j); loadHistory(); return; }
+      if (j.status === "failed" || j.status === "rejected") {
+        setStatus(`${STATUS[j.status]}: ${j.error || "bilinmeyen hata"}`, true); $("send").disabled = !file; loadHistory(); return;
+      }
+      const lang = j.language ? ` — dil: ${LANG[j.language.code] || j.language.code}` : "";
+      setStatus(`${STATUS[j.status] || j.status} (${sec} sn)${lang}…`);
+      poll(jobId, t0);
+    } catch (e) { setStatus("Durum alınamadı: " + e.message, true); $("send").disabled = !file; }
+  }, 1000);
+}
+
+// --- sonuç ---
+function show(job) {
+  current = job;
+  const r = job.result;
+  $("result").classList.remove("hidden");
+  const meta = $("meta");
+  meta.replaceChildren();
+  const lang = r.language || {};
+  const took = (new Date(job.updated_at) - new Date(job.created_at)) / 1000;
+  const items = [
+    ["Dil", `${LANG[lang.code] || lang.code || "?"}${lang.uncertain ? " (emin değil)" : ""}`],
+    ["Dil nasıl", `${SOURCE[lang.source] || lang.source || "-"}${lang.source === "tespit" ? ` · %${Math.round((lang.confidence || 0) * 100)}` : ""}`],
+    ["Ses süresi", fmt(r.duration)],
+    ["İşlem süresi", `${took.toFixed(1)} sn (oran ${(took / Math.max(r.duration, 0.001)).toFixed(2)})`],
+    ["Konuşmacı", String(r.speakers)],
+    ["Model", r.model],
+    ...(r.quality && r.quality.kapsama_yuzde !== undefined ? [["Kapsama",
+      `%${r.quality.kapsama_yuzde}` + (r.quality.kurtarilan_kelime ? ` (+${r.quality.kurtarilan_kelime} kurtarılan)` : "")]] : []),
+  ];
+  for (const [k, v] of items) meta.append(el("div", {}, el("b", {}, k), el("span", {}, v)));
+  const box = $("utts");
+  box.replaceChildren();
+  r.utterances.forEach((u, i) => box.append(uttRow(u, i)));
+  if (!r.utterances.length) box.append(el("p", { class: "sub" }, "Konuşma bulunamadı."));
+  loadAudio(job.job_id);
+}
+
+// düşük güvenli kelimeler altı çizili: düzeltme yapan kişi önce bunlara baksın
+function textWithLowConf(u) {
+  const p = el("p", {});
+  const low = new Set(u.low_confidence_words || []);
+  if (!low.size) { p.textContent = u.text; return p; }
+  u.text.split(" ").forEach((w, k) => {
+    if (k) p.append(" ");
+    p.append(low.has(k) ? el("span", { class: "low", title: "model bu kelimeden emin değil" }, w) : w);
+  });
+  return p;
+}
+
+function uttRow(u, i) {
+  const who = el("div", { class: "who", style: `color:${colorOf(u.speaker)}` }, speakerName(u.speaker));
+  if (u.edited) who.append(el("span", { class: "mark", title: "elle düzeltildi" }, "düzeltildi"));
+  const btn = el("button", { class: "edit-btn", type: "button", title: "metni ya da konuşmacıyı düzelt" }, "Düzelt");
+  const del = el("button", { class: "edit-btn", type: "button", title: "uydurma ya da yanlış satırı kaldır" }, "Sil");
+  const row = el("div", { class: "utt", title: "dinlemek için tıklayın" },
+    el("div", {}, who, el("div", { class: "t" }, `${fmt(u.start)} – ${fmt(u.end)}`)),
+    el("div", { class: "body" }, textWithLowConf(u), btn, del));
+  row.addEventListener("click", () => play(u.start, u.end));
+  btn.addEventListener("click", (e) => { e.stopPropagation(); openEditor(row, u, i); });
+  del.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!confirm("Bu satır sonuçtan kaldırılsın mı? (Kayıtta model hatası olarak kalır.)")) return;
+    try {
+      await api(`/jobs/${encodeURIComponent(current.job_id)}/utterances/${u.index ?? i}`, { method: "DELETE" });
+      current.result.utterances = current.result.utterances.filter((x) => x !== u);
+      row.remove();
+      setStatus("Satır kaldırıldı.");
+    } catch (err) { setStatus("Silinemedi: " + err.message, true); }
+  });
+  return row;
+}
+
+function openEditor(row, u, i) {
+  const ta = el("textarea", { "aria-label": "doğru metin" });
+  ta.value = u.text;
+  const names = [...new Set(current.result.utterances.map((x) => x.speaker))];
+  const list = el("datalist", { id: `spk-${i}` }, ...names.map((n) => el("option", { value: n }, speakerName(n))));
+  const spk = el("input", { list: `spk-${i}`, "aria-label": "konuşmacı", maxlength: "40" });
+  spk.value = u.speaker;
+  const save = el("button", { class: "btn", type: "button" }, "Kaydet");
+  const cancel = el("button", { class: "btn ghost", type: "button" }, "Vazgeç");
+  const ed = el("div", { class: "editor" }, ta,
+    el("div", { class: "row" }, el("span", { class: "sub" }, "Konuşmacı:"), spk, list, save, cancel));
+  const body = row.querySelector(".body");
+  body.replaceChildren(ed);
+  ed.addEventListener("click", (e) => e.stopPropagation());
+  ta.focus();
+  cancel.addEventListener("click", () => row.replaceWith(uttRow(u, i)));
+  save.addEventListener("click", async () => {
+    const patch = {};
+    if (ta.value.trim() !== u.text) patch.text = ta.value;
+    if (spk.value.trim() && spk.value.trim() !== u.speaker) patch.speaker = spk.value.trim();
+    if (!Object.keys(patch).length) { row.replaceWith(uttRow(u, i)); return; }
+    save.disabled = true;
+    try {
+      const res = await (await api(`/jobs/${encodeURIComponent(current.job_id)}/utterances/${u.index ?? i}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })).json();
+      const nu = Object.assign({}, u, { text: res.text, speaker: res.speaker, edited: true,
+                                        low_confidence_words: [] });
+      const pos = current.result.utterances.indexOf(u);
+      if (pos >= 0) current.result.utterances[pos] = nu;
+      row.replaceWith(uttRow(nu, i));
+      setStatus("Düzeltme kaydedildi (ince ayar verisine eklenir).");
+    } catch (e) { setStatus("Kaydedilemedi: " + e.message, true); save.disabled = false; }
+  });
+}
+
+async function loadAudio(jobId) {
+  const p = $("player");
+  if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
+  p.removeAttribute("src");
+  try {  // <audio src> başlık gönderemez: anahtarla indirip yerel adres veriyoruz
+    audioUrl = URL.createObjectURL(await (await api(`/jobs/${encodeURIComponent(jobId)}/audio`)).blob());
+    p.src = audioUrl;
+    p.classList.remove("hidden");
+  } catch { p.classList.add("hidden"); }  // saklama süresi dolmuş olabilir
+}
+
+function play(a, b) {
+  const p = $("player");
+  if (!p.src) return;
+  p.currentTime = a; stopAt = b; p.play();
+}
+$("player").addEventListener("timeupdate", () => { if (stopAt !== null && $("player").currentTime >= stopAt) { $("player").pause(); stopAt = null; } });
+$("player").addEventListener("seeking", () => { if (stopAt !== null && Math.abs($("player").currentTime - stopAt) > 30) stopAt = null; });
+
+// --- dışa aktarma (tarayıcıda üretilir) ---
+function srtTime(s) {
+  const ms = Math.round(s * 1000), h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60, sec = Math.floor(ms / 1000) % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")},${String(ms % 1000).padStart(3, "0")}`;
+}
+const EXPORT = {
+  txt: (r) => ["text/plain", r.utterances.map((u) => `[${fmt(u.start)}] ${speakerName(u.speaker)}: ${u.text}`).join("\n")],
+  srt: (r) => ["application/x-subrip", r.utterances.map((u, i) => `${i + 1}\n${srtTime(u.start)} --> ${srtTime(u.end)}\n${speakerName(u.speaker)}: ${u.text}\n`).join("\n")],
+  json: (r) => ["application/json", JSON.stringify(current, null, 2)],
+  rttm: (r) => ["text/plain", r.utterances.filter((u) => u.speaker !== "BELIRSIZ")
+    .map((u) => `SPEAKER ${r.job_id} 1 ${u.start.toFixed(3)} ${(u.end - u.start).toFixed(3)} <NA> <NA> ${u.speaker} <NA> <NA>`).join("\n") + "\n"],
+};
+document.querySelectorAll("[data-export]").forEach((b) => b.addEventListener("click", () => {
+  if (!current) return;
+  const kind = b.dataset.export, [type, body] = EXPORT[kind](current.result);
+  const a = el("a", { href: URL.createObjectURL(new Blob([body], { type: type + ";charset=utf-8" })), download: `${current.job_id}.${kind}` });
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}));
+
+$("reanalyze").addEventListener("click", async () => {
+  if (!current) return;
+  const v = prompt("Kaç kişi konuşuyor? (0 = sesten bulunsun)\nElle yapılan düzeltmeler yeni sonuçla değişir.",
+                   String(current.result.speakers || 0));
+  if (v === null) return;
+  const n = parseInt(v, 10);
+  if (!(n >= 0 && n <= 20)) { setStatus("0 ile 20 arasında bir sayı girin", true); return; }
+  try {
+    await api(`/jobs/${encodeURIComponent(current.job_id)}/reanalyze`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ num_speakers: n }) });
+    setStatus("Yeniden analiz kuyrukta…");
+    poll(current.job_id, performance.now());
+  } catch (e) { setStatus("Başlatılamadı: " + e.message, true); }
+});
+
+$("toDataset").addEventListener("click", () => {
+  if (!current) return;
+  $("dsReviewer").value = store.get("asr_reviewer") || ""; $("dsConsent").checked = false; $("dsOk").disabled = true;
+  $("dsDialog").showModal();
+});
+$("dsConsent").addEventListener("change", () => { $("dsOk").disabled = !$("dsConsent").checked; });
+$("dsDialog").addEventListener("close", async () => {
+  if ($("dsDialog").returnValue !== "ok" || !current) return;
+  const reviewer = $("dsReviewer").value.trim();
+  if (!reviewer) { setStatus("Kontrol eden kişinin adı gerekli", true); return; }
+  store.set("asr_reviewer", reviewer);
+  try {
+    await api(`/jobs/${encodeURIComponent(current.job_id)}/dataset`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewer, consent: $("dsConsent").checked, use: $("dsUse").value, notes: $("dsNotes").value }) });
+    setStatus("Onay kuyruğuna eklendi.");
+  } catch (e) { setStatus("Eklenemedi: " + e.message, true); }
+});
+
+$("del").addEventListener("click", async () => {
+  if (!current || !confirm("Bu analiz ve ses dosyası silinsin mi? Geri alınamaz.")) return;
+  try {
+    await api(`/jobs/${encodeURIComponent(current.job_id)}`, { method: "DELETE" });
+    current = null; $("result").classList.add("hidden"); setStatus("Silindi."); loadHistory();
+  } catch (e) { setStatus("Silinemedi: " + e.message, true); }
+});
+
+// --- geçmiş ---
+async function loadHistory() {
+  const box = $("hist");
+  try {
+    const jobs = await (await api("/jobs?limit=20")).json();
+    box.replaceChildren();
+    if (!jobs.length) { box.append(el("p", { class: "sub" }, "Henüz analiz yok.")); return; }
+    for (const j of jobs) {
+      const lang = j.language ? (LANG[j.language.code] || j.language.code) : (j.requested_language ? LANG[j.requested_language] : "dil ?");
+      const b = el("button", {},
+        el("span", {}, el("span", {}, new Date(j.created_at).toLocaleString("tr-TR")), " ", el("small", {}, `· ${lang} · ${j.job_id.slice(0, 8)}`)),
+        el("span", { class: `badge ${j.status}` }, STATUS[j.status] || j.status));
+      b.addEventListener("click", () => openJob(j.job_id));
+      box.append(b);
+    }
+  } catch (e) { box.replaceChildren(el("p", { class: "sub" }, "Geçmiş alınamadı: " + e.message)); }
+}
+
+async function openJob(id) {
+  try {
+    const j = await (await api(`/jobs/${encodeURIComponent(id)}`)).json();
+    if (j.status === "done") { show(j); setStatus(""); window.scrollTo({ top: $("result").offsetTop - 12, behavior: "smooth" }); }
+    else if (j.status === "queued" || j.status === "running") poll(id, performance.now());
+    else setStatus(`${STATUS[j.status]}: ${j.error || ""}`, true);
+  } catch (e) { setStatus(e.message, true); }
+}
+
+async function health() {
+  try {
+    const r = await fetch("/health"); const h = await r.json();
+    $("health").className = "dot " + (r.ok ? "ok" : "bad");
+    $("toDataset").classList.toggle("hidden", !(h.features && h.features.dataset_export));
+    $("health").title = r.ok ? `çalışıyor · diller: ${h.languages.join(", ")}` : "sorun: " + JSON.stringify(h.checks);
+  } catch { $("health").className = "dot bad"; $("health").title = "sunucuya ulaşılamıyor"; }
+}
+
+$("apiKey").value = store.get("asr_api_key");
+$("apiKey").addEventListener("change", () => { store.set("asr_api_key", $("apiKey").value.trim()); loadHistory(); });
+$("refresh").addEventListener("click", loadHistory);
+health(); setInterval(health, 30000);
+loadHistory();
+// canlı altyazı oturumu bitince açılan link: /?job=<id>
+const askedJob = new URLSearchParams(location.search).get("job");
+if (askedJob) openJob(askedJob);
+</script>
+</body>
+</html>

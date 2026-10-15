@@ -1,38 +1,68 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "live-stream"
-version = "0.1.0"
-description = "Konuşurken sesi anında metne dönüştüren canlı altyazı uygulaması (Faster-Whisper + Silero VAD)"
-authors = [{ name = "Tuğba Çevik" }]
-readme = "README.md"
-license = { text = "MIT" }
+version = "0.4.0"
+description = "Türkçe ses -> metin: konuşmacı ayrımlı toplu iş + canlı altyazı (faster-whisper, sherpa-onnx)"
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
-    "numpy>=1.24",
-    "soundfile>=0.12",
-    "python-dotenv>=1.0",
-    "faster-whisper>=1.0.3",
-    "silero-vad>=5.1",
+    "sherpa-onnx>=1.12",
+    "numpy",
+    "soundfile",
+    "soxr",
+    "onnxruntime",
+    "scipy",
+    "faster-whisper>=1.1",  # Türkçe varsayılan model (CTranslate2)
 ]
 
 [project.optional-dependencies]
-gpu = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
-dev = ["pytest>=8.0", "httpx>=0.27"]
-
-[project.scripts]
-live-stream = "live_stream.server:main"
+dev = ["pytest", "import-linter", "httpx", "jiwer"]
+server = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "redis>=5",
+    "python-dotenv",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "httpx",
+]
+bench = ["jiwer", "datasets<4.0", "sentencepiece"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-live_stream = ["static/*.html"]
+live_stream = ["infrastructure/db/migrations/script.py.mako", "interface/static/*.html"]
+
+[project.scripts]
+live-stream = "live_stream.interface.local_server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["models: modeller indirilmiş olmalı (models/ klasörü)"]
+
+# Katman kuralları: içteki katman dıştakini import edemez.
+[tool.importlinter]
+root_package = "live_stream"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Temiz mimari katmanları"
+type = "layers"
+layers = [
+    "live_stream.interface",
+    "live_stream.infrastructure",
+    "live_stream.application",
+    "live_stream.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain ve application model kütüphanesi bilmez"
+type = "forbidden"
+source_modules = ["live_stream.domain", "live_stream.application"]
+forbidden_modules = ["sherpa_onnx", "onnxruntime", "scipy", "soundfile", "soxr", "psycopg", "redis", "fastapi", "httpx", "sqlalchemy", "alembic", "faster_whisper", "ctranslate2"]

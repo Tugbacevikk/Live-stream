@@ -1,155 +1,190 @@
-# Canlı Altyazı (Live-stream)
+# Canlı Altyazı + Ses Analizi (Türkçe)
 
-Konuşurken sesi **anında metne dönüştüren**, tamamen **çevrimdışı** çalışan canlı altyazı uygulaması.
-Konferans, sunum ve ders gibi ortamlarda konuşmacının sözlerini ekranda (laptop veya projeksiyon) gerçek zamanlı gösterir.
+Türkçe konuşmayı metne çevirir; iki şekilde:
 
-[Ses Analizi Sistemi](https://github.com/Tugbacevikk/fine-tuning) projesinin canlı akış kardeşidir: aynı Faster-Whisper altyapısını kullanır,
-konferans sonrası kaydedilen ses dosyası konuşmacı ayrımı için o projeye verilebilir.
+- **Canlı altyazı** — konuşurken sözler ekranda (laptop ya da projeksiyon) anında belirir.
+  Konferans, sunum, ders için. Oturum bitince kayıt otomatik olarak analize gider.
+- **Ses analizi** — bir ses dosyası yüklenir; kimin ne zaman ne söylediği satır satır çıkar
+  (konuşmacı ayrımı). Başka sistemlere API ve imzalı webhook ile bağlanır.
 
-## Özellikler
+İkisi **aynı modelleri ve aynı çekirdeği** kullanır; tamamen **çevrimdışı** çalışır.
+Bu repo üç projenin birleşimidir: Live-stream (canlı akış), Vietnamese-speech-to-text-models
+(ölçülmüş toplu iş çekirdeği) ve fine-tuning (ilk Türkçe sistem). Neyin nereden alındığı:
+[ADR 0007](docs/adr/0007-birlesik-turkce-sistem.md).
 
-- **Gerçek zamanlı metin:** konuşurken gri ara metin, cümle bitince kesinleşmiş metin
-- **Akıllı cümle sonu tespiti:** Silero VAD ile duraklamalar algılanır; alkış/öksürük gibi kısa sesler elenir
-- **GPU hızlandırma:** NVIDIA GPU varsa otomatik kullanılır, CUDA sorunu olursa çökmeden CPU'ya geçer
-- **Sunum modu:** tam ekran, büyük puntolu, yalnızca son 3 satır (projeksiyona uygun)
-- **Çökme güvenliği:** ses (`.wav`) ve metin (`.txt`, `.jsonl`) anında diske yazılır
-- **Otomatik yeniden bağlanma:** bağlantı koparsa ses kesilmeden tekrar bağlanır
-- **Ekran uykusu engelleme:** konuşma sırasında laptop ekranı kararmaz
-- **Uydurma (halüsinasyon) filtresi:** Whisper'ın sessizlikte ürettiği "Altyazı M.K." gibi kalıplar gösterilmez
-- **Dosyayla test:** bir kaydı gerçek zaman hızında çalarak, konferans öncesi evde deneme
+## Hızlı başlangıç (Windows)
 
-## Nasıl çalışır?
-
-```
-Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz PCM, 100 ms paketler)
-              │  WebSocket
-              ▼
-          Sunucu ─► Silero VAD ─► Cümle sonu tespiti ─┬─► Ara metin   (beam=1, hızlı)
-                                                      └─► Kesin metin (beam=5, doğru) ─► Ekran + disk
+```bat
+baslat.bat
 ```
 
-1. Tarayıcı mikrofon sesini 16 kHz'e çevirip her 100 ms'de sunucuya yollar.
-2. Sunucu her 32 ms'lik pencerede "konuşma var mı?" diye bakar.
-3. Konuşma sürerken her ~1,2 sn'de bir **ara metin** üretilir.
-4. ~0,7 sn duraklama olunca cümle biter, **kesin metin** üretilir (önceki cümleler bağlam olarak verilir).
+İlk çalıştırmada modeller iner (~1,6 GB; internet bir kez gerekir), sonra sunucu açılır:
 
-## Kurulum
+| Adres | Ne |
+|---|---|
+| http://127.0.0.1:8000/canli | Canlı altyazı |
+| http://127.0.0.1:8000 | Dosya yükle → konuşmacılı transkript, geçmiş, düzeltme |
+| http://127.0.0.1:8000/docs | API belgesi |
 
-Python 3.10+ gerekir.
+Redis, PostgreSQL ya da Docker gerekmez (SQLite + iş parçacıkları). Durdurmak: `durdur.bat`.
+
+Linux / WSL / elle:
 
 ```bash
-git clone https://github.com/Tugbacevikk/live-stream.git
-cd live-stream
-python -m venv .venv
-# Windows:  .venv\Scripts\activate
-# Linux/WSL: source .venv/bin/activate
-pip install -e .
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -e ".[server]"
+python scripts/download_models.py
+python -m live_stream                                   # ya da: live-stream
 ```
 
-### NVIDIA GPU ile (önerilen)
+### NVIDIA GPU (canlı altyazı için önerilen)
 
 ```bash
-pip install -e ".[gpu]"
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 
-Bu komut CUDA 12 için cuBLAS ve cuDNN 9 kütüphanelerini kurar; Windows'ta DLL yolları uygulama tarafından otomatik ayarlanır.
-GPU açılamazsa uygulama uyarı verip CPU ile devam eder. Hangi cihazın kullanıldığı ekranın sağ üstünde görünür (`small · GPU`).
+`WHISPER_DEVICE=auto` (varsayılan) GPU'yu kendisi bulur; CUDA açılamazsa uyarı verip CPU ile
+devam eder. Hangi cihazın kullanıldığı canlı ekranın sağ üstünde görünür (`medium · GPU`).
+Windows'ta DLL yolları uygulama tarafından ayarlanır.
 
-## Çalıştırma
+## Canlı altyazı
 
-```bash
-python -m live_stream
 ```
-
-Windows'ta `baslat.bat` dosyasına çift tıklamak da yeterli.
-Ardından tarayıcıda **http://localhost:8000** adresini açın ve **Başlat**'a basın.
-
-> İlk çalıştırmada Whisper modeli indirilir (`small` ≈ 470 MB). Konferanstan **önce** internetli bir yerde bir kez çalıştırın;
-> sonrasında model önbellekten yüklenir ve internet gerekmez.
-
-### Kısayollar
+Mikrofon ─► Tarayıcı (AudioWorklet, 16 kHz, 100 ms paketler) ─► WebSocket /ws/live
+                                                                     │
+       Silero VAD ─► cümle sonu (700 ms duraklama) ─┬─► ara metin   (beam 1, ~1,2 sn'de bir)
+                                                    └─► kesin metin (beam 5 + önceki cümleler) ─► ekran + disk
+                                                                     │
+                                         oturum bitince .wav ─► toplu iş: konuşmacı ayrımlı transkript
+```
 
 | Tuş | İşlev |
-|-----|-------|
-| `F` | Sunum modu (tam ekran) aç/kapat |
+|---|---|
+| `F` | Sunum modu (tam ekran, büyük punto, son satırlar) |
 | `Esc` | Sunum modundan çık |
 | `+` / `-` | Yazıyı büyüt / küçült |
 
+- **Dosyayla test:** bir kaydı gerçek zaman hızında çalar; konferanstan önce evde prova için.
+- **Kayıtlar:** her oturum `recordings/` altına anında yazılır (çökmeye dayanıklı):
+  `.wav` (ham ses), `.txt` (`[00:01:23] metin`), `.jsonl`.
+- **Konuşmacılı transkript:** oturum bitince ekranda "Konuşmacılı transkript ↗" bağlantısı çıkar;
+  soru-cevap bölümü dahil kimin ne söylediği ana sayfada açılır, satır satır düzeltilebilir.
+  Kapatmak: ayarlarda kutucuk ya da `LIVE_AUTO_ANALYZE=false`.
+- **Bağlantı koparsa** ses kesilmeden yeniden bağlanır; ekran uykusu engellenir.
+
+**Konferans ipuçları**
+
+- Laptop mikrofonu salon yankısını da alır; yaka mikrofonu ya da ses masası çıkışı kaliteyi çok
+  artırır (ekrandaki listeden seçilir).
+- Sunumdaki özel terimleri ve adları `HOTWORDS`'e yazın (ör. `YOLOv8 TÜBİTAK Bursa Teknik`).
+- Cümleler ortadan bölünüyorsa `END_SILENCE_MS`'i artırın (900–1000), metin geç geliyorsa azaltın.
+- Ekrandaki **gecikme** 2 sn'yi aşıyorsa `LIVE_MODEL=faster-whisper-small` (indirmek:
+  `python scripts/download_models.py --tr faster-whisper-small`). Toplu iş medium'da kalır.
+
+## Ses analizi (toplu iş)
+
+```
+ses ─► 16 kHz mono ─► VAD (Silero) ─► ASR (faster-whisper, kelime zamanlı) ───────► kelimeler
+                         │                                                              │
+                         └─► konuşmacı ayrımı (CAM++ imzası + spektral kümeleme) ───────┤
+                                                                                        ▼
+                                                    birleştirme ─► [0.1 - 3.7] speaker_00: ...
+```
+
+- Konuşmacı sayısı istekte verilmezse sesten bulunur.
+- Whisper'ın sessizlikte uydurduğu kalıplar ("Altyazı M.K.", "İzlediğiniz için teşekkürler")
+  ve tekrar döngüleri atılır; başka alfabeden uydurma kelimeler süzülür.
+- Yazıya dökülmemiş konuşma aralıkları yeniden çözülür (güvenlik ağı); kapsama oranı sonuçta.
+- Düşük güvenli kelimeler işaretlenir; arayüzde her satır düzeltilebilir. Düzeltmeler ince
+  ayar verisine dönüşür (onaylı, test/eğitim ayrımlı).
+- Hedef: **1 dakikalık ses en geç 1 dakikada biter** (CPU). Kendi bilgisayarında ölç:
+  `python benchmarks/kabul_testi.py kayit.wav`.
+
+```bash
+curl -F file=@kayit.wav http://localhost:8000/jobs                          # -> {"job_id": ...}
+curl -F file=@kayit.wav -F num_speakers=2 -F callback_url=https://ornek.com/hook http://localhost:8000/jobs
+curl http://localhost:8000/jobs/<job_id>                                     # durum + sonuç
+python -m live_stream.interface.cli kayit.wav --speakers 2                   # API'siz, tek dosya
+```
+
+Bağlanacak sistem için alanlar, durumlar, webhook imzası ve tekrar kuralları:
+[docs/entegrasyon.md](docs/entegrasyon.md).
+
+### Tam mod (sunucu, çok sayıda mesaj)
+
+Çok sayıda eşzamanlı mesaj (ör. 4000 sesli geri bildirim, yalnızca CPU) için:
+API + Redis Streams kuyruğu + PostgreSQL + ayrı işçiler.
+
+```bash
+docker compose up -d --build          # ya da Windows'ta: baslat_tam.bat
+```
+
+Canlı altyazı bu modda yoktur; o, konuşmacının kendi bilgisayarında yerel modda çalışır.
+
 ## Ayarlar
 
-`.env.example` dosyasını `.env` olarak kopyalayıp düzenleyin. En önemlileri:
+`.env.example` → `.env` (baslat.bat ilk çalıştırmada kendisi kopyalar). En önemlileri:
 
 | Değişken | Varsayılan | Açıklama |
-|----------|-----------|----------|
-| `WHISPER_MODEL` | `small` | `tiny`, `base`, `small`, `medium`. Büyüdükçe doğruluk artar, gecikme artar |
-| `WHISPER_DEVICE` | `auto` | `auto`, `cuda`, `cpu` |
-| `WHISPER_LANGUAGE` | `tr` | Konuşma dili |
-| `WHISPER_HOTWORDS` | — | Sunumdaki özel terimler, isimler (ör. `YOLOv8 TÜBİTAK Bursa Teknik`) |
-| `END_SILENCE_MS` | `700` | Cümle bitti demek için gereken duraklama |
-| `PARTIAL_INTERVAL_SEC` | `1.2` | Ara metin sıklığı; yavaş bilgisayarda artırın veya `0` yapın |
-| `SAVE_RECORDINGS` | `true` | Ses ve metni `recordings/` klasörüne kaydet |
-
-Cümle sonu, ara metin sıklığı ve kayıt ayarları ekrandaki **Ayarlar** bölümünden de değiştirilebilir.
-
-### Hangi model?
+|---|---|---|
+| `TR_MODEL` | `faster-whisper-medium` | `faster-whisper-small` daha hızlı; `omnilingual-300m` en hızlı |
+| `WHISPER_DEVICE` | `auto` | `auto`, `cuda`, `cpu` (sunucuda `cpu`) |
+| `HOTWORDS` | — | Özel terimler ve adlar, boşlukla |
+| `LIVE_MODEL` | (TR_MODEL) | Canlı altyazının modeli; farklıysa ayrıca yüklenir |
+| `END_SILENCE_MS` | `700` | Cümle bitti demek için duraklama |
+| `PARTIAL_INTERVAL_SEC` | `1.2` | Ara metin sıklığı; yavaş bilgisayarda artırın ya da `0` |
+| `LIVE_AUTO_ANALYZE` | `true` | Oturum bitince konuşmacı ayrımlı transkript |
+| `NUM_SPEAKERS` | `0` | 0 = sesten bul |
+| `CONCURRENCY` | `auto` | Aynı anda işlenen dosya; çekirdek ve belleğe göre |
 
 | Donanım | Önerilen |
-|---------|----------|
-| NVIDIA GPU (4 GB+) | `small`, isterseniz `medium` deneyin |
-| Sadece CPU (6+ çekirdek) | `base` veya `small` + `PARTIAL_INTERVAL_SEC=2` |
-| Zayıf CPU | `tiny` |
-
-Ekrandaki **gecikme** göstergesi 2 saniyenin üstüne çıkıyorsa daha küçük bir model seçin.
-
-## Konferans için ipuçları
-
-- **Mikrofon:** laptop mikrofonu salon yankısını da alır. Yaka mikrofonu veya ses masasından çıkış kaliteyi çok artırır; ekrandaki listeden seçebilirsiniz.
-- **Terimler:** sunumdaki teknik kelimeleri `WHISPER_HOTWORDS`'e yazın.
-- **Prova:** sunum provanızı kaydedip **Dosyayla test** ile çalarak ayarları önceden deneyin.
-- **Duraklama ayarı:** cümleleriniz ortadan bölünüyorsa `END_SILENCE_MS`'i artırın (900–1000), metin geç geliyorsa azaltın (500–600).
-
-## Kayıtlar
-
-Her oturum `recordings/` klasörüne yazılır:
-
-```
-recordings/2026-10-14_10-35-00.wav     # ham ses (16 kHz mono)
-recordings/2026-10-14_10-35-00.txt     # [00:01:23] zaman damgalı metin
-recordings/2026-10-14_10-35-00.jsonl   # makine okunur sonuçlar
-```
-
-Konferans sonrası `.wav` dosyasını [Ses Analizi Sistemi](https://github.com/Tugbacevikk/fine-tuning)'ne yükleyerek
-konuşmacı ayrımlı (soru-cevap bölümü dahil) daha doğru bir transkript elde edebilirsiniz.
-
-## WebSocket protokolü
-
-Kendi istemcinizi yazmak isterseniz: `ws://localhost:8000/ws`
-
-- **Gönderilen:** ikili mesaj = Int16 little-endian PCM, 16 kHz, mono. Bitirmek için `{"type": "stop"}`.
-- **Alınan:** `ready`, `partial`, `final`, `discard`, `stats`, `error`, `done` tipli JSON mesajlar (ayrıntı: `src/live_stream/server.py`).
+|---|---|
+| NVIDIA GPU 4 GB (ör. RTX 3050 Ti) | Toplu iş `medium`; canlı gecikme yüksekse `LIVE_MODEL=faster-whisper-small` |
+| Yalnızca CPU, 6+ çekirdek | `small`, `PARTIAL_INTERVAL_SEC=2` |
+| Zayıf CPU | `omnilingual-300m` (noktalamasız, küçük harf) |
 
 ## Proje yapısı
 
 ```
 src/live_stream/
-├── config.py        # .env / ortam değişkeni ayarları
-├── vad.py           # Silero ve enerji tabanlı konuşma algılayıcı
-├── segmenter.py     # cümle sonu tespiti, ara/kesin iş üretimi
-├── transcriber.py   # Faster-Whisper (GPU→CPU yedekli), uydurma filtresi
-├── recorder.py      # ses + metnin anında diske yazılması
-├── session.py       # bağlantı başına oturum
-├── server.py        # FastAPI + WebSocket
-└── static/index.html  # altyazı ekranı
+  domain/          veri tipleri (dış kütüphane yok)
+  application/     iş kuralları ve portlar
+    transcribe.py    toplu iş: dil → ASR → konuşmacı → birleştirme
+    live.py          canlı: cümle sonu tespiti (Segmenter) + oturum (LiveSession)
+    jobs.py, fusion.py, coverage.py, language.py, maintenance.py, config.py, ports.py
+  infrastructure/  modeller ve depolama
+    faster_whisper_asr.py   Türkçe ASR (toplu + canlı, GPU→CPU yedeği)
+    sherpa_vad.py, live_vad.py, cluster_diarizer.py, sherpa_asr.py, recorder.py,
+    db/ (SQLAlchemy + Alembic), redis_streams.py, thread_queue.py, webhook.py, catalog.py
+  interface/       local_server.py (yerel: toplu + canlı), live_server.py, api.py (tam mod),
+                   stream_worker.py, dispatcher.py, bakim.py, cli.py, static/ (index, canli)
+benchmarks/ scripts/ tests/{unit,db,integration} docs/{adr, olcumler.md, entegrasyon.md}
 ```
 
-## Testler
+Katman kuralı (`lint-imports`): içteki katman dıştakini bilmez; `application` hiçbir model
+kütüphanesini import etmez. Canlı akış ve toplu iş aynı portlardan geçer.
+
+## Geliştirme
 
 ```bash
-pip install -e ".[dev]"
-pytest
+pip install -e ".[dev,server]"
+pytest                                  # birim + depo testleri (model gerekmez)
+pytest -m models                        # gerçek modellerle (models/ içinde ne varsa)
+lint-imports                            # katman kuralları
+python benchmarks/kabul_testi.py a.wav b.wav --es-zamanli 4
 ```
 
-Testler model indirmeden çalışır (sahte transkripsiyon motoru kullanılır).
+Diğer ölçümler: `benchmarks/diyalog_testi.py` (DER, cpWER), `yerel_dogruluk_testi.py` (WER),
+`konusmaci_testi.py`, `turkce_dogruluk_testi.py`. Sonuçlar: [docs/olcumler.md](docs/olcumler.md).
+
+## Yol haritası
+
+- [x] Toplu iş çekirdeği (Vietnamese-speech-to-text-models'ten, Türkçe kısmı)
+- [x] Canlı altyazı çekirdeğe katıldı: aynı model, ONNX Silero (PyTorch'suz), oturum sonu toplu iş
+- [ ] Canlı ekranda konuşmacı etiketi (cümle başına CAM++ imzası, oturum sonunda kesinleşir)
+- [ ] Türkçe doğru metinli ölçüm: FLEURS tr + kendi sunum provası (WER, DER; canlı ve toplu)
+- [ ] Canlı mod için model karşılaştırması: medium / small / Omnilingual, gecikme × WER
+- [ ] İkinci dil (Vietnamca): Zipformer + dil tespiti, Vietnamca reposundan
 
 ## Lisans
 

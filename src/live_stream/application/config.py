@@ -1,0 +1,242 @@
+"""Hattın tüm ayarları tek yerde. Kodda sabit sayı yerine buradan okunur.
+
+Her dil bir LanguageProfile'dır: hangi ASR modeli, hangi ayarlarla.
+Yeni dil eklemek = yeni bir profil eklemek; uygulama kodu değişmez.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class ModelRef:
+    """Bir model paketinin dosyaları.
+
+    kind: altyapıda hangi adaptörün kullanılacağı
+          ("zipformer-transducer", "whisper", "omnilingual-ctc")
+    files: rol -> dosya adı (klasöre göre), ör. {"encoder": "encoder.int8.onnx"}
+    """
+
+    name: str
+    kind: str
+    folder: Path
+    files: dict[str, str]
+    license: str = ""
+
+    def path(self, role: str) -> str:
+        return str(Path(self.folder) / self.files[role])
+
+    def has(self, role: str) -> bool:
+        return role in self.files and (Path(self.folder) / self.files[role]).exists()
+
+
+@dataclass(frozen=True)
+class WhisperParams:
+    """faster-whisper (CTranslate2) ayarları. Değerler fine-tuning projesindeki Türkçe
+    ayarlardan alındı; farklı olanların gerekçesi yanında."""
+
+    # "cpu" (sunucu), "cuda" ya da "auto": GPU varsa GPU, CUDA açılamazsa CPU'ya düşer
+    # (Live-stream'den; Windows'ta eksik cuBLAS/cuDNN DLL'leri sık görülür).
+    device: str = "cpu"
+    # "auto": GPU'da int8_float16, CPU'da int8 (bellek ve hız)
+    compute_type: str = "auto"
+    beam_size: int = 5
+    batch_size: int = 8               # BatchedInferencePipeline: aynı anda çözülen parça
+    repetition_penalty: float = 1.2
+    no_repeat_ngram_size: int = 3
+    no_speech_threshold: float = 0.6
+    compression_ratio_threshold: float = 2.4
+    # Projede None idi. None iken "sessizlik olasılığı > 0,6" tek başına parçayı atar;
+    # -1,0 (kütüphane varsayılanı) ile model metinden eminse parça korunur -> sessiz
+    # konuşan hastanın cümlesi atılmaz.
+    log_prob_threshold: float | None = -1.0
+    # Projede "Türkçe ses kaydı." idi. Whisper istemi sessiz yerlerde aynen yazabiliyor;
+    # dil zaten verildiği için varsayılan kapalı (istenirse açılır, çıktıdan da süzülür).
+    initial_prompt: str | None = None
+    hotwords: str | None = None       # boşlukla ayrılmış terimler (ör. ilaç adları)
+    # aynı kelime art arda bu sayıdan fazla gelirse fazlası atılır (Whisper döngüsü)
+    max_repeat: int = 2
+    # Aynı modeli aynı anda kullanabilecek iş sayısı. 1 iken yerel moddaki iş parçacıkları
+    # Türkçe işlerde birbirini BEKLER (CTranslate2 bir çağrıyı bir işçide çalıştırır);
+    # yerel modda eşzamanlı iş sayısına eşitlenir (composition.default_config workers=).
+    num_workers: int = 1
+
+
+@dataclass(frozen=True)
+class AsrParams:
+    num_threads: int = 2
+    max_word_duration: float = 1.0  # tek kelime en fazla bu kadar sürebilir (sn; Omnilingual)
+    # sherpa-onnx modelleri (Omnilingual): parçalar en fazla bu kadar toplam sesten oluşan
+    # gruplar halinde çözülür; hepsini birden çözmek belleği patlatıyor (Vietnamca projesinde
+    # 77 dk'lık testte 6 GB). 10 sn: ~460 MB.
+    batch_seconds: float = 10.0
+    # Whisper sessizlik/gürültüde bu cümleleri uyduruyor; parça yalnızca bundan ibaretse atılır
+    drop_phrases: tuple[str, ...] = ()
+    whisper: WhisperParams = field(default_factory=WhisperParams)  # yalnızca faster-whisper
+
+
+@dataclass(frozen=True)
+class LanguageProfile:
+    code: str  # ISO 639-1: "tr"
+    asr_model: ModelRef
+    asr: AsrParams = field(default_factory=AsrParams)
+    # "full": sesin tamamı en sessiz anlardan bölünerek ASR'a verilir (Omnilingual).
+    # "vad": yalnızca VAD'ın konuşma dediği parçalar (Whisper: sessizlikte metin uyduruyor).
+    segmentation: str = "full"
+
+
+@dataclass(frozen=True)
+class ChunkConfig:
+    """'full' bölme (Omnilingual): parça en fazla max_len sn, kesim en sessiz ana."""
+
+    max_len: float = 15.0
+    min_len: float = 5.0
+
+
+@dataclass(frozen=True)
+class LidConfig:
+    """Dil tespiti (Whisper encoder + tek adım decoder), ucuzdan pahalıya kademeli.
+
+    stages: (encoder, decoder) çiftleri. İlki karar veremezse (ret ya da düşük
+    güven) sıradaki denenir. Varsayılan: tiny (~0,25 sn) -> small (~1 sn).
+    """
+
+    stages: tuple[tuple[str, str], ...] = (
+        ("models/sherpa-onnx-whisper-tiny/tiny-encoder.int8.onnx",
+         "models/sherpa-onnx-whisper-tiny/tiny-decoder.int8.onnx"),
+        ("models/sherpa-onnx-whisper-small/small-encoder.int8.onnx",
+         "models/sherpa-onnx-whisper-small/small-decoder.int8.onnx"),
+    )
+    num_threads: int = 2
+    max_seconds: float = 30.0      # Whisper penceresi 30 sn; ilk 30 sn konuşma yeter
+    min_supported: float = 0.5     # desteklenen dillerin toplam olasılığı bunun altındaysa ret
+    min_confidence: float = 0.8    # kısıtlı seçimde güven bunun altındaysa "uncertain"
+
+
+@dataclass(frozen=True)
+class VadConfig:
+    model: str = "models/silero_vad.onnx"
+    threshold: float = 0.5
+    min_silence_duration: float = 0.25
+    min_speech_duration: float = 0.25
+    max_speech_duration: float = 20.0  # Whisper 30 sn'den uzun parçayı kesiyor; 20 güvenli
+    # Silero parça sonunu erken kesiyor: Türkçede "mı?", "alın" gibi son kelimeler
+    # kayboldu (12 Ekim). Her parça iki yandan bu kadar genişletilir (komşuya taşmadan).
+    pad: float = 0.2
+    sample_rate: int = 16000
+
+
+@dataclass(frozen=True)
+class DiarizerConfig:
+    """Konuşmacı ayrıştırma.
+
+    kind="cluster" (varsayılan): VAD parçaları -> pencere -> CAM++ imzası -> kümeleme.
+    kind="pyannote": pyannote segmentation-3.0 + kümeleme (eski yol; kısa konuşma
+    sıralarında Vietnamca sesleri ayıramadı, bkz. cluster_diarizer.py).
+    """
+
+    kind: str = "cluster"
+    # Kümeleme yöntemi: "spectral" (NME-SC: kişi sayısını özdeğer boşluğundan bulur) ya da
+    # "ahc" (sabit eşikle birleştirme). 13 Ekim, VietMed'den 9 gerçek görüşme diyaloğu:
+    #   ahc 0,70: kişi sayısı 4/9, DER %33,5 | ahc 0,55: 7/9, %17,1 ama tek kişilik 63/70
+    #   spectral (birleştirme 0,35): 7/9, DER %17,1, tek kişilik 66/70; sayı verilince %15,9
+    # Aynı kaydın iki kişisi arası uzaklık 0,38-0,58, telefondaki tek kişinin kendi içi ~0,3:
+    # tek bir sabit eşik ikisine birden uymuyor; spektral yöntem buna daha dayanıklı.
+    method: str = "spectral"
+    merge_distance: float = 0.35  # spectral: merkezleri bundan yakın kümeler aynı kişi
+    embedding_model: str = "models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+    segmentation_model: str = "models/sherpa-onnx-pyannote-segmentation-3-0/model.onnx"
+    # konuşmacı sayısı: 0 = sesten bul (istekte verilirse o kullanılır)
+    num_speakers: int = 0
+    # kosinüs uzaklığı eşiği. Gerçek sesle ayarlandı (13 Ekim, CAM++, VietMed'den 56 diyalog,
+    # telefonla bağlanan hastalar dahil): 0,65 -> sayı 38/56 | 0,70 -> 47/56 | 0,75 -> 29/56.
+    # Temiz sentetik seste 0,65 daha iyi (25/28, 0,70'te 22/28); gerçek ses esas alındı.
+    cluster_threshold: float = 0.70
+    # pencere 3 sn/kayma 1,5 sn: duraksamasız konuşmada %89; 1,5/0,75: %99-100 (12 Ekim)
+    window: float = 1.5          # sn: imza penceresi
+    hop: float = 0.75            # sn: pencere kayması (konuşmacı değişimi çözünürlüğü)
+    min_window: float = 0.5      # sn: bundan kısa parçadan imza çıkarılmaz
+    # Toplamı max(1,5 sn, konuşmanın %8'i)'nden az olan "konuşmacı" en yakın kişiye katılır
+    # (gülme, gürültü, müzik ayrı kişi sanılmasın). VietMed 50 tek kişilik dosya + 28
+    # sentetik diyalog (12 Ekim):  1 sn/%0 -> 34/50, 27/28 | 1-3 sn/%8-10 -> 48/50, 28/28.
+    # Oran asıl işi yapıyor; 3 sn mutlak alt sınır kısa mesajlarda gerçek kişileri
+    # (13 sn'lik seste 2 sn konuşan) siliyordu. Bedeli: konuşmanın %8'inden azını konuşan
+    # kişi ayrı çıkmaz; sayı biliniyorsa istekte num_speakers verilince kural uygulanmaz.
+    min_speaker_duration: float = 1.5
+    min_speaker_share: float = 0.08
+    # Az konuşan küme en yakın kişiden bu kosinüs uzaklığından daha uzaksa birleştirilmez
+    # (projedeki "benzerlik koruması", benzerlik 0,5 = uzaklık 0,5). 0 = kapalı. Ölçüme göre.
+    small_keep_distance: float = 0.0
+    min_duration_on: float = 0.3   # yalnızca pyannote
+    min_duration_off: float = 0.5  # yalnızca pyannote
+    num_threads: int = 2
+
+
+@dataclass(frozen=True)
+class FusionConfig:
+    """Kelimeleri konuşmacılara atama ayarları."""
+
+    # kelimenin orta noktası iki konuşmacı aralığına birden düşüyorsa:
+    # baskın konuşmacının örtüşme payı bu oranın altındaysa BELIRSIZ
+    min_dominance: float = 0.6
+    # orta nokta hiçbir aralığa düşmüyorsa en yakın aralığa bu mesafeye kadar atanır (sn)
+    max_gap: float = 0.5
+    # aynı konuşmacının arasında bu kadar sessizlik varsa yeni satır başlar (sn)
+    new_utterance_gap: float = 1.5
+    # tek satır en fazla bu kadar sürer (sn); uzun konuşma en uzun duraklamadan bölünür.
+    # 13 Ekim arayüz denemesi: bir doktorun 92 sn'si tek satırdı (okuması ve altyazısı zor).
+    # 0 = bölme yok.
+    max_utterance: float = 25.0
+    # Araya sıkışmış kısa konuşmacı (A, kısa B, A): B bu süreden (sn) kısaysa A'ya verilir
+    # (projedeki SemanticRefiner "sandwich" düzeltmesi). 0 = kapalı (varsayılan).
+    # 14 Ekim, 9 Vietnamca diyalog: DER %10,64 -> 1,0 sn %10,44 | 1,5 sn %10,14 | 2,0 sn %10,07.
+    # Kapalı bırakıldı: bu diyaloglar kesitlerden kurulduğu için içinde gerçek kısa araya
+    # girme ("ừ", "evet", "hı hı") yok; düzeltme tam da onları siler ve bu sette ölçülemez.
+    # Gerçek, kesintisiz görüşme kaydıyla ölçülünce açılabilir (FUSION_SANDWICH_MAX).
+    sandwich_max: float = 0.0
+    # kelime güveni bunun altındaysa satırda işaretlenir (Omnilingual: parça olasılıkları,
+    # faster-whisper: kelime olasılığı); düzeltme yapan kişi önce bunlara bakar
+    low_conf: float = 0.5
+
+
+@dataclass(frozen=True)
+class ProfileConfig:
+    """İşlem profilleri (fine-tuning projesindeki PIPELINE_PROFILE).
+
+    full: her adım çalışır (varsayılan).
+    feedback: kısa ve çok sayıda gelen geri bildirim mesajları için. Ses min_diarize_sec'ten
+      kısaysa konuşmacı ayırma atlanır (tek kişi kabul edilir); Whisper beam 1 (açgözlü çözme).
+      Omnilingual zaten hızlı olduğu için onda değişen bir şey yok.
+    Projede ayrıca SNR düşükse gürültü giderme (DeepFilterNet) vardı: PyTorch ister ve
+    internetsiz CPU kurulumuna uymaz; alınmadı (ADR 0006).
+    """
+
+    default: str = "full"
+    min_diarize_sec: float = 10.0
+
+
+@dataclass(frozen=True)
+class SafetyNetConfig:
+    """Yazıya dökülmemiş konuşma (fine-tuning projesindeki güvenlik ağı + kapsama ölçüsü).
+
+    VAD'ın konuşma dediği ama hiç kelime çıkmayan, min_gap'ten uzun aralıklar bulunur;
+    motor destekliyorsa (Whisper) kenar payıyla yeniden çözülür. Omnilingual'e zaten
+    sesin tamamı verildiği için onlarda yalnızca kapsama ölçülür.
+    """
+
+    enabled: bool = True
+    min_gap: float = 2.0
+    margin: float = 0.3
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    languages: dict[str, LanguageProfile]
+    lid: LidConfig | None = field(default_factory=LidConfig)  # None: dil istekte zorunlu
+    vad: VadConfig = field(default_factory=VadConfig)
+    chunk: ChunkConfig = field(default_factory=ChunkConfig)
+    diarizer: DiarizerConfig = field(default_factory=DiarizerConfig)
+    fusion: FusionConfig = field(default_factory=FusionConfig)
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
+    safety: SafetyNetConfig = field(default_factory=SafetyNetConfig)
